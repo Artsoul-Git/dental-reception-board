@@ -1,0 +1,47 @@
+@charset "UTF-8";
+
+/* 印刷は「予約票」と「当日一覧」の2種類。
+   画面はすべて隠し、#printArea に組み立てた内容だけを出す。 */
+
+@page { margin: 14mm; }
+
+body > *:not(.printarea) { display: none !important; }
+
+.printarea {
+  display: block !important;
+  color: #000;
+  font-family: "Hiragino Kaku Gothic ProN", "Yu Gothic", "Meiryo", sans-serif;
+}
+
+/* ---- 予約票 ---- */
+.ticket {
+  border: 1.5px solid #000;
+  border-radius: 4px;
+  padding: 10mm;
+  max-width: 120mm;
+}
+
+.ticket__h {
+  font-size: 15pt;
+  font-weight: 700;
+  border-bottom: 1px solid #000;
+  padding-bottom: 3mm;
+  margin-bottom: 5mm;
+}
+
+.ticket__when { font-size: 20pt; font-weight: 700; line-height: 1.4; margin-bottom: 5mm; }
+
+.ticket__rows { display: grid; grid-template-columns: 22mm 1fr; gap: 2mm 4mm; font-size: 11pt; }
+.ticket__rows dt { color: #333; }
+.ticket__rows dd { margin: 0; }
+
+.ticket__foot { margin-top: 6mm; padding-top: 3mm; border-top: 1px dashed #666; font-size: 10pt; line-height: 1.7; }
+
+/* ---- 当日一覧 ---- */
+.sheet__h { font-size: 14pt; font-weight: 700; margin-bottom: 2mm; }
+.sheet__sub { font-size: 10pt; color: #333; margin-bottom: 4mm; }
+
+.sheet__table { width: 100%; border-collapse: collapse; font-size: 10pt; }
+.sheet__table th, .sheet__table td { border: 1px solid #333; padding: 1.6mm 2mm; text-align: left; }
+.sheet__table th { background: #eee; }
+.sheet__table tr { break-inside: avoid; }
