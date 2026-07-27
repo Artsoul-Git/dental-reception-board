@@ -78,6 +78,9 @@ window.DRB = window.DRB || {};
       '.an-advice li::before{content:"・";color:var(--accent);}',
       '.an-note{font-size:12px;color:var(--ink-mute);margin-top:8px;}',
       '.an-bars .bars__i{grid-template-columns:8em 1fr 3.6em;}',
+      '.an-bars--wide .bars__i{grid-template-columns:10em 1fr 8em;}',
+      '.an-tag{font-style:normal;font-size:10.5px;border-radius:999px;padding:0 6px;',
+      'margin-left:5px;background:var(--hold-tint);color:#7a5318;white-space:nowrap;}',
       '.an-scroll{overflow-x:auto;}',
       '.an-panel > .h3:first-child{margin-top:2px;}',
       '.an-figs{display:flex;gap:20px;flex-wrap:wrap;align-items:baseline;font-size:13.5px;}',
@@ -91,6 +94,7 @@ window.DRB = window.DRB || {};
       '.an-row__rate{display:none;}',
       '.an-legend__i{grid-template-columns:12px 1fr auto auto;}',
       '.an-bars .bars__i{grid-template-columns:6.5em 1fr 3.6em;}',
+      '.an-bars--wide .bars__i{grid-template-columns:8em 1fr 7em;}',
       '}'
     ].join('');
     document.head.appendChild(s);
@@ -374,13 +378,18 @@ window.DRB = window.DRB || {};
 
   /* ================= 横棒リスト ================= */
 
-  /** rows = [{label, color, n, text}]。text があれば数値の代わりに文字を出す。 */
-  function barsList(rows, max) {
-    var ul = el('ul', 'bars an-bars');
+  /**
+   * rows = [{label, color, n, text, badge}]。text があれば数値の代わりに文字を出す。
+   * badge は見出しの右に付く小さな印（「休眠」など）。
+   */
+  function barsList(rows, max, extraClass) {
+    var ul = el('ul', 'bars an-bars' + (extraClass ? ' ' + extraClass : ''));
     var top = max || rows.reduce(function (a, r) { return Math.max(a, Number(r.n) || 0); }, 0);
     rows.forEach(function (r) {
       var li = el('li', 'bars__i');
-      li.appendChild(el('span', 'bars__label', r.label));
+      var label = el('span', 'bars__label', r.label);
+      if (r.badge) label.appendChild(el('i', 'an-tag', r.badge));
+      li.appendChild(label);
       if (r.n === null || r.n === undefined) {
         li.appendChild(el('span', 'an-note', r.text || '—'));
         li.appendChild(el('span'));
@@ -1078,13 +1087,17 @@ window.DRB = window.DRB || {};
   /* ================= 休眠患者 ================= */
 
   var DORMANT_MONTHS = 6;
-  var DORMANT_BUCKETS = [
-    { label: '6〜8か月', min: 6, max: 8 },
-    { label: '9〜11か月', min: 9, max: 11 },
-    { label: '12〜17か月', min: 12, max: 17 },
-    { label: '18〜23か月', min: 18, max: 23 },
-    { label: '24か月以上', min: 24, max: Infinity }
-  ];
+
+  /* 足が遠のきはじめる時期を見たいので、立ち上がりの1〜8か月は1か月刻みで並べる。 */
+  var AWAY_BUCKETS = (function () {
+    var out = [];
+    for (var m = 1; m <= 8; m++) out.push({ label: m + 'か月', min: m, max: m });
+    out.push({ label: '9〜11か月', min: 9, max: 11 });
+    out.push({ label: '12〜17か月', min: 12, max: 17 });
+    out.push({ label: '18〜23か月', min: 18, max: 23 });
+    out.push({ label: '24か月以上', min: 24, max: Infinity });
+    return out;
+  })();
 
   function purposeInfo(cfg, key) {
     var p = M.purposeOf(cfg, key);
@@ -1113,43 +1126,59 @@ window.DRB = window.DRB || {};
       return;
     }
 
-    /* --- 休眠かどうかの仕分け --- */
+    /* --- 経過月数で仕分け。(a) は1か月以上の広い母集団、(b) 以降は6か月以上の休眠患者。 --- */
+    var away = [];
     var dormant = [];
     seen.forEach(function (s) {
       var last = s.recs[s.recs.length - 1];
       var months = monthsSince(last.date, ix.today);
-      if (months < DORMANT_MONTHS) return;
+      if (months < 1) return;
       if (ix.hasFuture[s.p.id]) return;      // この先のご予約が入っている方は除く
-      dormant.push({ p: s.p, recs: s.recs, months: months, lastPurpose: last.purpose });
+      var rec = { p: s.p, recs: s.recs, months: months, lastPurpose: last.purpose };
+      away.push(rec);
+      if (months >= DORMANT_MONTHS) dormant.push(rec);
     });
     var isDormant = {};
     dormant.forEach(function (d) { isDormant[d.p.id] = true; });
 
     var panel = el('div', 'an-panel');
 
-    /* --- (a) 何か月目からお見えになっていないか --- */
-    panel.appendChild(el('h3', 'h3', '何か月目からお見えになっていないか'));
-    if (!dormant.length) {
-      panel.appendChild(el('p', 'lead', '休眠されている患者さんはいらっしゃいません。'));
+    /* --- (a) 最終のご来院からの経過月数（1か月目から並べる） --- */
+    panel.appendChild(el('h3', 'h3', '最終のご来院からの経過月数'));
+    if (!away.length) {
+      panel.appendChild(el('p', 'lead',
+        '最終のご来院から1か月以上が過ぎている患者さんはいらっしゃいません。'));
     } else {
-      var buckets = DORMANT_BUCKETS.map(function (b) {
+      var buckets = AWAY_BUCKETS.map(function (b) {
         var n = 0;
-        dormant.forEach(function (d) { if (d.months >= b.min && d.months <= b.max) n++; });
+        away.forEach(function (d) { if (d.months >= b.min && d.months <= b.max) n++; });
         return {
-          label: b.label, n: n, color: 'var(--hold)',
-          text: n + '名（' + pct(n, dormant.length) + '%）'
+          label: b.label,
+          n: n,
+          color: b.min >= DORMANT_MONTHS ? 'var(--hold)' : 'var(--accent)',
+          badge: b.min >= DORMANT_MONTHS ? '休眠' : null,
+          text: n + '名（' + pct(n, away.length) + '%）'
         };
       });
-      panel.appendChild(barsList(buckets));
+      panel.appendChild(barsList(buckets, null, 'an-bars--wide'));
+
       panel.appendChild(el('p', 'an-note',
-        '休眠されている患者さんは合わせて ' + dormant.length + '名（ご来院実績のある ' +
-        seen.length + '名のうち ' + pct(dormant.length, seen.length) +
-        '%）です。最終のご来院から ' + DORMANT_MONTHS +
-        'か月以上が経ち、この先のご予約が入っていない方を数えています。'));
+        '最終のご来院から1か月以上が過ぎ、この先のご予約が入っていない ' + away.length +
+        '名の分布です。' + DORMANT_MONTHS +
+        'か月以上が休眠の目安（合計 ' + dormant.length + '名）ですが、' +
+        'その手前の動きも見えるよう1か月目から並べています。'));
+
+      // 山になっている区分を1行添える
+      var peak = null;
+      buckets.forEach(function (b) { if (!peak || b.n > peak.n) peak = b; });
+      if (peak && peak.n > 0) {
+        panel.appendChild(el('p', 'an-note',
+          peak.label + 'がもっとも多く ' + peak.n + '名（' + pct(peak.n, away.length) + '%）です。'));
+      }
     }
 
-    /* --- (b) 離脱までのご来院回数 --- */
-    panel.appendChild(el('h3', 'h3', '離脱までのご来院回数'));
+    /* --- (b) 離脱までのご来院回数（休眠患者） --- */
+    panel.appendChild(el('h3', 'h3', '離脱までのご来院回数（休眠患者・6か月以上）'));
     if (!dormant.length) {
       panel.appendChild(el('p', 'lead', '対象となる患者さんがいらっしゃいません。'));
     } else {
@@ -1171,7 +1200,7 @@ window.DRB = window.DRB || {};
     }
 
     /* --- (c) 最後のご来院のご用件 上位3 --- */
-    panel.appendChild(el('h3', 'h3', '最後のご来院のご用件（多い順に3つ）'));
+    panel.appendChild(el('h3', 'h3', '最後のご来院のご用件（休眠患者・6か月以上／多い順に3つ）'));
     if (!dormant.length) {
       panel.appendChild(el('p', 'lead', '対象となる患者さんがいらっしゃいません。'));
     } else {
@@ -1186,7 +1215,7 @@ window.DRB = window.DRB || {};
           text: lastCount[k] + '名（' + pct(lastCount[k], dormant.length) + '%）'
         };
       }).sort(function (a, b) { return b.n - a.n; }).slice(0, 3);
-      panel.appendChild(barsList(top));
+      panel.appendChild(barsList(top, null, 'an-bars--wide'));
     }
 
     /* --- (d) 初診用件・最終用件ごとの再来院率（対象は全患者） --- */
@@ -1225,7 +1254,7 @@ window.DRB = window.DRB || {};
     var firstRows = boxRows(firstBox);
     var lastRows = boxRows(lastBox);
 
-    panel.appendChild(el('h3', 'h3', 'ご用件ごとの再来院率'));
+    panel.appendChild(el('h3', 'h3', 'ご用件ごとの再来院率（対象はご来院実績のある全患者）'));
     var two = el('div', 'two');
 
     var c1 = el('div');
