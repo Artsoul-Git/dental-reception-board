@@ -11,7 +11,8 @@ window.DRB = window.DRB || {};
   var D = DRB.dialogs;
   var $ = function (id) { return document.getElementById(id); };
 
-  var SEEDED_KEY = 'drb.seeded.v2';
+  /* この日付のデモを組み立て済み、という印。日が変われば作り直す。 */
+  var SEEDED_KEY = 'drb.seededOn.v3';
   var WD = ['日', '月', '火', '水', '木', '金', '土'];
 
   var state = {
@@ -53,8 +54,16 @@ window.DRB = window.DRB || {};
     updateConnBadge();
 
     reload().then(function () {
-      if (!localStorage.getItem(SEEDED_KEY) && !state.bookings.length) return seedDemo();
-    }).then(renderAll).catch(reportError);
+      // デモサイトなので自由に触っていただき、日が変わったら基準の状態へ戻す
+      if (localStorage.getItem(SEEDED_KEY) !== M.todayKey()) {
+        return seedDemo().then(function () { state.wasReset = true; });
+      }
+      if (!state.bookings.length) return seedDemo();
+    }).then(renderAll).then(function () {
+      if (state.wasReset) {
+        toast('本日ぶんのデモを、はじめの状態に戻しました。ご自由にお試しください。');
+      }
+    }).catch(reportError);
   }
 
   function reload() {
@@ -69,14 +78,36 @@ window.DRB = window.DRB || {};
       });
   }
 
+  /**
+   * 見えている画面だけを描き直す。
+   * 2年ぶんのご予約を持つと全画面の描き直しは重くなり、
+   * 1件登録するたびに数秒待たされてしまうため。
+   */
   function renderAll() {
-    renderDay();
-    renderWeek();
-    renderMonth();
-    renderPatients();
-    renderNotify();
-    renderWaitlist();
-    if (state.report) renderReport();
+    var tab = state.activeTab || 'day';
+    if (tab === 'day') { renderDay(); renderWaitlist(); }
+    else if (tab === 'week') renderWeek();
+    else if (tab === 'month') renderMonth();
+    else if (tab === 'patient') renderPatients();
+    else if (tab === 'notify') renderNotify();
+    else if (tab === 'report' && state.report) renderReport();
+    updateNotifyBadge();
+  }
+
+  /** バッジの数だけは全画面で出すので、文面を組み立てない軽い数え方で求める */
+  var badgeTimer = null;
+  function updateNotifyBadge() {
+    clearTimeout(badgeTimer);
+    badgeTimer = setTimeout(function () {
+      var n = X.countNotify(state.cfg, state.bookings, state.patients, state.messages);
+      var badge = $('notifyBadge');
+      badge.textContent = String(n);
+      badge.hidden = n === 0;
+
+      var dn = state.messages.filter(function (m) { return m.state === 'draft'; }).length;
+      $('draftBadge').textContent = String(dn);
+      $('draftBadge').hidden = dn === 0;
+    }, 150);
   }
 
   function reportError(err) {
@@ -101,9 +132,19 @@ window.DRB = window.DRB || {};
       $('tab-' + n).setAttribute('aria-selected', String(on));
       $('panel-' + n).hidden = !on;
     });
+    state.activeTab = name;
+
     if (name === 'setup') fillSetupForm();
-    if (name === 'notify') renderNotify();
-    if (name === 'report' && !state.report) setReportRange(M.shiftDays(M.todayKey(), -29), M.todayKey());
+    else if (name === 'notify') renderNotify();
+    else if (name === 'week') renderWeek();
+    else if (name === 'month') renderMonth();
+    else if (name === 'patient') renderPatients();
+    else if (name === 'day') { renderDay(); renderWaitlist(); }
+    else if (name === 'report') {
+      // 再来院率などは判定に期間が要るので、はじめは1年ぶんを出す
+      if (!state.report) setReportRange(M.shiftDays(M.todayKey(), -364), M.todayKey());
+      else renderReport();
+    }
   }
 
   /* ================= 日別ボード ================= */
@@ -249,7 +290,8 @@ window.DRB = window.DRB || {};
   }
 
   function openDetail(booking) {
-    D.openDetail(state.cfg, booking).then(function (action) {
+    D.openDetail(state.cfg, booking, X.findPatient(state.patients, booking.patientId))
+      .then(function (action) {
       if (action === 'print') { D.printTicket(state.cfg, booking); return; }
       if (action === 'edit') return openEdit(booking);
       if (action === 'cancel') return cancelBooking(booking, false);
@@ -279,38 +321,136 @@ window.DRB = window.DRB || {};
 
   /* ---- キャンセル ---- */
 
+  /**
+   * 取り消しの受け付け。
+   * 途中でやめた場合はご予約を一切さわらない（元の状態のまま残す）。
+   * 「キャンセル処理を実行」を押して初めて保存する。
+   */
   function cancelBooking(booking, noshow) {
-    return D.openCancel(state.cfg, booking, noshow).then(function (res) {
-      if (!res) return;
+    var patient = X.findPatient(state.patients, booking.patientId);
+
+    return D.openCancel(state.cfg, booking, patient, noshow).then(function (res) {
+      if (!res) {
+        toast('処理をやめました。ご予約はそのままです。');
+        return;
+      }
 
       var b = DRB.clone(booking);
       b.status = res.noshow ? 'noshow' : 'canceled';
       b.cancelReason = res.reason;
       b.canceledAt = new Date().toISOString();
       b.updatedAt = b.canceledAt;
+      // 直前の取り消しは他の方へ回せないので、枠を空きに戻さず残す
+      b.slotHeld = !!res.holdSlot;
 
       var chain = save(b);
 
       if (res.addContact && b.patientId) {
-        chain = chain.then(function () {
-          return state.store.save('contacts', X.newContact(b.patientId, {
-            channel: res.noshow ? 'other' : 'phone',
-            direction: res.noshow ? 'out' : 'in',
-            bookingId: b.id,
-            subject: res.noshow ? '無断キャンセル' : 'ご予約の取り消し',
-            body: M.formatDateFull(b.date) + ' ' + b.time + ' のご予約について。' + res.reason
-          }));
-        }).then(reload).then(renderAll);
+        chain = chain.then(function () { return logCancelContact(b, res); });
       }
 
-      if (res.sendMail && b.email) {
-        chain = chain.then(function () { return sendOne(b, 'cancel'); });
+      if (res.follow === 'mail') {
+        chain = chain.then(function () { return sendRebookMail(b, patient); });
+      } else if (res.follow === 'rebook') {
+        chain = chain.then(function () { return openRebookFlow(b, patient); });
       }
 
       return chain.then(function () {
-        toast(res.noshow ? '無断キャンセルとして記録しました。' : 'ご予約を取り消しました。');
-        return offerWaitlist(b);
+        toast(res.noshow
+          ? '無断キャンセルとして処理しました。'
+          : (b.slotHeld ? 'ご予約を取り消しました。枠は「キャンセル」として残しています。'
+                        : 'ご予約を取り消しました。枠は空きに戻しました。'));
+        if (!b.slotHeld) return offerWaitlist(b);
       });
+    });
+  }
+
+  /** お電話をおかけした事実を応対記録に残す。手段と向きも合わせて記録する。 */
+  function logCancelContact(b, res) {
+    var called = res.follow === 'mail' || res.follow === 'rebook';
+    var subject = res.noshow ? '無断キャンセルの応対' : 'ご予約の取り消し';
+    var body = M.formatDateFull(b.date) + ' ' + b.time + ' のご予約について。' + res.reason;
+
+    if (res.follow === 'mail') {
+      body += '\nお電話を差し上げましたがおつなぎできず、取り消しのご連絡と再予約の候補をメールでお送りしました。';
+    } else if (res.follow === 'rebook') {
+      body += '\nお電話でご連絡がつき、振替のご予約を承りました。';
+    }
+
+    return state.store.save('contacts', X.newContact(b.patientId, {
+      channel: called ? 'phone' : (res.noshow ? 'other' : 'phone'),
+      direction: called ? 'out' : 'in',
+      bookingId: b.id,
+      subject: subject,
+      body: body
+    })).then(reload).then(renderAll);
+  }
+
+  /** 取り消しのご連絡メール。再予約の候補を3件添える。 */
+  function sendRebookMail(b, patient) {
+    var to = b.email || (patient ? patient.email : '');
+    if (!to) {
+      toast('メールアドレスのご登録がないため、メールは作れませんでした。お電話でのご連絡をお願いします。');
+      return;
+    }
+    var suggestions = X.rebookSuggestions(state.cfg, state.bookings, b, 3, 3);
+    var subject = '【' + state.cfg.clinicName + '】' +
+      M.formatDateFull(b.date) + ' のご予約について';
+
+    return D.openMail({
+      title: b.name + ' 様への取り消しのご連絡',
+      to: to, name: b.name,
+      subject: subject,
+      body: X.rebookMailBody(state.cfg, b, patient, suggestions),
+      canSend: state.store.canSendMail
+    }).then(function (edited) {
+      if (!edited) return;
+      return deliver([{
+        kind: 'cancel', channel: 'mail', to: to, name: b.name,
+        patientId: b.patientId, bookingId: b.id,
+        subject: edited.subject, body: edited.body
+      }]);
+    });
+  }
+
+  /** 振替のご予約。月間の空きから選んでいただき、決まったらこの画面に結果を出す。 */
+  function openRebookFlow(b, patient) {
+    return D.openRebook({
+      cfg: state.cfg,
+      bookings: state.bookings,
+      booking: b,
+      patient: patient,
+      onPick: function (dateKey, time, unit, purpose, staffId) {
+        var grid = M.buildGrid(state.cfg, dateKey, state.bookings);
+        var idx = grid.index[time];
+        if (idx === undefined) return;
+
+        var span = Math.max(1, M.purposeOf(state.cfg, purpose).span || 1);
+        if (!M.canPlace(grid, idx, unit, span, null, state.cfg)) {
+          toast('その時間はちょうど埋まってしまいました。他のお時間をお選びください。');
+          return;
+        }
+
+        var now = new Date().toISOString();
+        var fresh = {
+          id: M.newId(), date: dateKey, time: time, unit: unit, span: span,
+          patientId: b.patientId, name: b.name, cardNo: b.cardNo,
+          phone: b.phone, email: b.email,
+          purpose: purpose, memo: '（' + M.formatDateLong(b.date) + ' からの振替）',
+          status: 'booked', staffId: staffId, source: 'phone',
+          arrivedAt: '', doneAt: '', cancelReason: '', canceledAt: '',
+          slotHeld: false, createdAt: now, updatedAt: now
+        };
+
+        save(fresh).then(function () {
+          if (D.rebookShowResult) {
+            D.rebookShowResult('振替のご予約をお取りしました　▶　' +
+              M.formatDateFull(dateKey) + ' ' + time + '　' + M.columnLabel(state.cfg, unit));
+          }
+          if (D.rebookRedraw) D.rebookRedraw();
+          toast('振替のご予約を登録しました。');
+        }).catch(reportError);
+      }
     });
   }
 
@@ -335,7 +475,24 @@ window.DRB = window.DRB || {};
   }
 
   function save(booking) {
-    return state.store.save('bookings', booking).then(reload).then(renderAll);
+    return state.store.save('bookings', booking)
+      .then(function () { return touch('bookings', booking); })
+      .then(renderAll);
+  }
+
+  /**
+   * 保存したものを手元の一覧にも反映する。
+   * ブラウザ内保存では全件を読み直す必要がないため、差分だけ当てて速さを保つ。
+   * スプレッドシート連携のときは、他の端末の変更も拾うため読み直す。
+   */
+  function touch(box, item) {
+    if (state.store.canSendMail) return reload();
+    var list = state[box];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === item.id) { list[i] = item; return Promise.resolve(); }
+    }
+    list.push(item);
+    return Promise.resolve();
   }
 
   /* ================= 週間・月間 ================= */
@@ -367,6 +524,8 @@ window.DRB = window.DRB || {};
     $('monthToday').addEventListener('click', function () {
       state.monthKey = M.todayKey(); renderMonth();
     });
+    $('monthPurpose').addEventListener('change', renderMonth);
+    $('monthStaff').addEventListener('change', renderMonth);
   }
 
   function shiftMonth(n) {
@@ -376,15 +535,43 @@ window.DRB = window.DRB || {};
   }
 
   function renderMonth() {
+    var cfg = state.cfg;
+
+    /* ご用件・担当のセレクタは、台帳から「予約を入れる」で来たときに意味を持つ */
+    if (!$('monthPurpose').options.length) {
+      D.fillSelect($('monthPurpose'), cfg.purposes, 'key', 'label', 'ご用件で絞らない');
+      D.fillSelect($('monthStaff'), cfg.staff, 'id', 'name', '担当を決めない');
+    }
+    $('monthPurposeBar').hidden = false;
+
+    var purposeKey = $('monthPurpose').value || '';
+    $('monthPurposeNote').textContent = state.prefillPatient
+      ? state.prefillPatient.name + ' 様のご予約を入れます。ご用件を選ぶと、必要な枠を続けて取れる日と時刻だけが残ります。'
+      : 'ご用件を選ぶと、必要な枠を続けて取れる開始時刻だけを表示します。';
+
     V.renderMonth({
-      cfg: state.cfg, bookings: state.bookings, monthKey: state.monthKey,
-      selectedKey: state.selectedMonthDay,
+      cfg: cfg, bookings: state.bookings, monthKey: state.monthKey,
+      selectedKey: state.selectedMonthDay, purposeKey: purposeKey,
+      minKey: M.todayKey(),
       onPickDay: function (key) { state.selectedMonthDay = key; renderMonth(); }
     });
     V.renderMonthDetail({
-      cfg: state.cfg, bookings: state.bookings, dateKey: state.selectedMonthDay,
+      cfg: cfg, bookings: state.bookings, dateKey: state.selectedMonthDay,
+      purposeKey: purposeKey,
       onPickSlot: function (key, time, unit) {
-        goDate(key); showTab('day'); openCreate(key, time, unit);
+        var pre = null;
+        if (state.prefillPatient) {
+          var p = state.prefillPatient;
+          pre = {
+            patientId: p.id, name: p.name, cardNo: p.cardNo,
+            phone: p.phone, email: p.email, purpose: purposeKey || undefined,
+            staffId: $('monthStaff').value
+          };
+        } else if (purposeKey) {
+          pre = { purpose: purposeKey, staffId: $('monthStaff').value };
+        }
+        goDate(key); showTab('day'); openCreate(key, time, unit, pre);
+        state.prefillPatient = null;
       }
     });
   }
@@ -397,7 +584,7 @@ window.DRB = window.DRB || {};
       renderPatients();
     });
     $('btnPtNew').addEventListener('click', function () {
-      D.openPatient(state.cfg, null).then(function (p) {
+      D.openPatient(state.cfg, null, state.patients).then(function (p) {
         if (!p) return;
         return state.store.save('patients', p).then(reload).then(function () {
           state.ptSelected = p.id;
@@ -420,12 +607,16 @@ window.DRB = window.DRB || {};
       patient: X.findPatient(state.patients, state.ptSelected),
       bookings: state.bookings, contacts: state.contacts, messages: state.messages,
       onEdit: function (p) {
-        D.openPatient(state.cfg, p).then(function (out) {
+        D.openPatient(state.cfg, p, state.patients).then(function (out) {
           if (!out) return;
           return state.store.save('patients', out).then(reload).then(function () {
             renderAll(); toast('患者さんの情報を直しました。');
           });
         }).catch(reportError);
+      },
+      onEditNext: function (p, openNext) {
+        if (!openNext) { toast('これから先の未処理のご予約がありません。'); return; }
+        openDetail(openNext);
       },
       onContact: function (p) {
         D.openContact(state.cfg, p).then(function (c) {
@@ -436,10 +627,12 @@ window.DRB = window.DRB || {};
         }).catch(reportError);
       },
       onBook: function (p) {
-        showTab('month');
-        state.selectedMonthDay = null;
-        toast(p.name + '様のご予約を入れる日を、カレンダーからお選びください。');
         state.prefillPatient = p;
+        state.selectedMonthDay = null;
+        state.monthKey = M.todayKey();
+        showTab('month');
+        renderMonth();
+        toast(p.name + '様のご用件をお選びいただくと、必要な枠を取れる日だけが残ります。');
       },
       onMail: function (p) {
         var tpl = state.cfg.templates.dm;
@@ -464,7 +657,7 @@ window.DRB = window.DRB || {};
 
   /* ================= お知らせ・案内 ================= */
 
-  var SUBS = ['queue', 'recall', 'dm', 'tpl', 'log'];
+  var SUBS = ['queue', 'draft', 'recall', 'dm', 'tpl', 'log'];
 
   function wireNotify() {
     SUBS.forEach(function (n) {
@@ -476,14 +669,39 @@ window.DRB = window.DRB || {};
           $('panel-' + m).hidden = !on;
         });
         if (n === 'tpl') C.renderTemplates(state.cfg);
-        if (n === 'log') C.renderLog(state.cfg, state.messages, $('logSearch').value);
+        if (n === 'log') C.renderLog(state.cfg, state.messages, $('logSearch').value, state.patients);
       });
     });
 
     $('btnSendReminders').addEventListener('click', function () {
       deliver(C.checkedItems('remList', state.outbox.rem));
     });
+    $('btnDraftReminders').addEventListener('click', function () {
+      stash(C.checkedItems('remList', state.outbox.rem));
+    });
     $('btnCheckAllRem').addEventListener('click', function () { C.toggleAll('remList'); });
+
+    $('btnSendDrafts').addEventListener('click', function () {
+      var picked = C.checkedItems('draftList', state.outbox.draft);
+      if (!picked.length) { toast('お送りする下書きが選ばれていません。'); return; }
+      // 下書きは送信し直すので、元の控えは取り除いてから送る
+      dropDraftIds(picked.map(function (m) { return m.id; }))
+        .then(function () { return deliver(picked); })
+        .catch(reportError);
+    });
+    $('btnCheckAllDraft').addEventListener('click', function () { C.toggleAll('draftList'); });
+    $('btnDropDrafts').addEventListener('click', function () {
+      var picked = C.checkedItems('draftList', state.outbox.draft);
+      if (!picked.length) { toast('捨てる下書きが選ばれていません。'); return; }
+      D.confirm('下書きを捨てる', picked.length + ' 件の下書きを捨てます。よろしいですか。', '捨てる')
+        .then(function (ok) {
+          if (!ok) return;
+          return dropDraftIds(picked.map(function (m) { return m.id; }));
+        }).then(function () { toast('下書きを捨てました。'); }).catch(reportError);
+    });
+
+    $('recallElapsed').addEventListener('change', renderNotify);
+    $('recallChannel').addEventListener('change', renderNotify);
 
     $('btnSendThanks').addEventListener('click', function () {
       deliver(C.checkedItems('thxList', state.outbox.thx));
@@ -526,9 +744,48 @@ window.DRB = window.DRB || {};
   function renderNotify() {
     var cfg = state.cfg;
 
+    /* 経過期間の選択肢は1〜12か月。定期健診のご案内は2か月以上空いた方が土台。 */
+    var elapsedSel = $('recallElapsed');
+    if (elapsedSel.options.length <= 1) {
+      for (var mo = 1; mo <= 12; mo++) {
+        var o = V.el('option', null, mo + 'か月以上');
+        o.value = String(mo);
+        elapsedSel.appendChild(o);
+      }
+    }
+    if (!$('recallChannel').options.length) {
+      D.fillSelect($('recallChannel'), DRB.DM_CHANNELS, 'key', 'label');
+      $('recallChannel').value = cfg.reminder.recallChannel || 'postcard';
+    }
+
     state.outbox.rem = X.reminderTargets(cfg, state.bookings, state.patients, state.messages);
     state.outbox.thx = X.thanksTargets(cfg, state.bookings, state.patients, state.messages);
-    state.outbox.recall = X.recallTargets(cfg, state.bookings, state.patients, state.messages);
+    state.outbox.recall = X.recallTargets(cfg, state.bookings, state.patients, state.messages, {
+      minMonths: Number(elapsedSel.value) || 0
+    });
+
+    /* お届けの手段を切り替えたら、宛先の見え方もそろえる */
+    var ch = $('recallChannel').value || 'postcard';
+    state.outbox.recall.forEach(function (r) {
+      var p = X.findPatient(state.patients, r.patientId);
+      r.channel = ch;
+      r.to = ch === 'mail' ? (p && p.email) || ''
+           : ch === 'line' ? ((p && p.lineId) ? 'LINE（登録あり）' : '')
+           : 'ハガキ（宛名を印刷します）';
+    });
+
+    state.outbox.draft = state.messages.filter(function (m) { return m.state === 'draft'; })
+      .sort(function (a, b) { return String(b.at).localeCompare(String(a.at)); })
+      .map(function (m) {
+        var p = X.findPatient(state.patients, m.patientId);
+        return {
+          id: m.id, kind: m.kind, channel: m.channel || 'mail', to: m.to,
+          name: p ? p.name : '（台帳に登録のない方）',
+          patientId: m.patientId, bookingId: m.bookingId,
+          subject: m.subject, body: m.body,
+          when: C.kindLabel(cfg, m.kind) + '　' + C.stampLabel(m.at) + ' に下書き'
+        };
+      });
 
     C.renderOutbox({
       hostId: 'remList', items: state.outbox.rem, onPreview: previewOne,
@@ -540,8 +797,21 @@ window.DRB = window.DRB || {};
     });
     C.renderOutbox({
       hostId: 'recallList', items: state.outbox.recall, onPreview: previewOne,
-      emptyText: 'いまご案内の時期を迎えている方はいらっしゃいません。'
+      emptyText: 'この条件に当てはまる方はいらっしゃいません。'
     });
+    C.renderOutbox({
+      hostId: 'draftList', items: state.outbox.draft, onPreview: previewOne,
+      emptyText: '下書きはありません。'
+    });
+
+    $('recallCount').textContent = state.outbox.recall.length
+      ? state.outbox.recall.length + ' 名が対象です（' +
+        (Number(elapsedSel.value) || X.RECALL_MIN_MONTHS) + 'か月以上お見えでない方）。'
+      : '対象の方はいらっしゃいません。';
+
+    var dn = state.outbox.draft.length;
+    $('draftBadge').textContent = String(dn);
+    $('draftBadge').hidden = dn === 0;
 
     var n = state.outbox.rem.length + state.outbox.thx.length + state.outbox.recall.length;
     var badge = $('notifyBadge');
@@ -572,7 +842,43 @@ window.DRB = window.DRB || {};
       $('quotaNote').textContent = 'デモのため実際には送信しません。';
     }
 
-    C.renderLog(state.cfg, state.messages, $('logSearch').value);
+    C.renderLog(state.cfg, state.messages, $('logSearch').value, state.patients);
+  }
+
+  /** 選んだぶんを下書きとして溜めておく。送信はしない。 */
+  function stash(items) {
+    if (!items || !items.length) { toast('下書きに入れる相手が選ばれていません。'); return Promise.resolve(); }
+
+    return items.reduce(function (chain, m) {
+      return chain.then(function () {
+        return state.store.save('messages', {
+          id: X.newMessageId(),
+          patientId: m.patientId || '', bookingId: m.bookingId || '',
+          kind: m.kind, channel: m.channel || 'mail',
+          to: m.to, subject: m.subject, body: m.body,
+          at: new Date().toISOString(), state: 'draft', error: ''
+        });
+      });
+    }, Promise.resolve()).then(reload).then(renderAll).then(function () {
+      toast(items.length + ' 件を下書きに入れました。「下書き」タブからお送りいただけます。');
+    }).catch(reportError);
+  }
+
+  /** 下書きの控えを取り除く（ブラウザ内保存のみ。連携時は状態を捨てた印にする） */
+  function dropDraftIds(ids) {
+    var keep = state.messages.filter(function (m) { return ids.indexOf(m.id) === -1; });
+    if (state.store.canSendMail) {
+      // まとめ置き換えができないので、1件ずつ「捨てた」印を付ける
+      return ids.reduce(function (chain, id) {
+        var m = state.messages.filter(function (x) { return x.id === id; })[0];
+        if (!m) return chain;
+        var dropped = DRB.clone(m);
+        dropped.state = 'failed';
+        dropped.error = '下書きを捨てました';
+        return chain.then(function () { return state.store.save('messages', dropped); });
+      }, Promise.resolve()).then(reload).then(renderAll);
+    }
+    return state.store.replace('messages', keep).then(reload).then(renderAll);
   }
 
   function previewOne(item) {
@@ -601,19 +907,37 @@ window.DRB = window.DRB || {};
       return {
         id: X.newMessageId(),
         patientId: m.patientId || '', bookingId: m.bookingId || '',
-        kind: m.kind, to: m.to, subject: m.subject, body: m.body,
+        kind: m.kind, channel: m.channel || 'mail',
+        to: m.to, subject: m.subject, body: m.body,
         at: new Date().toISOString(), state: 'queued', error: ''
       };
     });
 
-    return state.store.sendBulk(stamped).then(function (res) {
+    /* ハガキ・LINEはこの画面からは送れない。お出しした記録として残す。 */
+    var mailable = stamped.filter(function (m) { return DRB.channelOf(m.channel).sendable; });
+    var offline = stamped.filter(function (m) { return !DRB.channelOf(m.channel).sendable; });
+
+    if (!mailable.length) {
+      return offline.reduce(function (chain, m) {
+        m.state = 'simulated';
+        return chain.then(function () { return state.store.save('messages', m); });
+      }, Promise.resolve()).then(reload).then(renderAll).then(function () {
+        toast(offline.length + ' 件を「お出しした」として記録しました。' +
+          '（' + DRB.channelOf(offline[0].channel).label + 'はこの画面からは送信しません）');
+      });
+    }
+
+    return state.store.sendBulk(mailable).then(function (res) {
       var byId = {};
       (res.results || []).forEach(function (r) { byId[r.id] = r; });
+      offline.forEach(function (m) { m.state = 'simulated'; });
 
       return stamped.reduce(function (chain, m) {
         var r = byId[m.id];
-        m.state = r ? r.state : (state.store.canSendMail ? 'sent' : 'simulated');
-        m.error = (r && r.error) || '';
+        if (m.state !== 'simulated') {
+          m.state = r ? r.state : (state.store.canSendMail ? 'sent' : 'simulated');
+          m.error = (r && r.error) || '';
+        }
         return chain.then(function () { return state.store.save('messages', m); });
       }, Promise.resolve()).then(function () {
         var ok = stamped.filter(function (m) { return m.state === 'sent' || m.state === 'simulated'; }).length;
@@ -704,6 +1028,38 @@ window.DRB = window.DRB || {};
     $('repLast90').addEventListener('click', function () {
       setReportRange(M.shiftDays(M.todayKey(), -89), M.todayKey());
     });
+    $('repLast365').addEventListener('click', function () {
+      setReportRange(M.shiftDays(M.todayKey(), -364), M.todayKey());
+    });
+
+    $('repWeekPrev').addEventListener('click', function () {
+      state.repWeekKey = M.shiftDays(state.repWeekKey || startOfWeek(M.todayKey()), -7);
+      renderReport();
+    });
+    $('repWeekNext').addEventListener('click', function () {
+      state.repWeekKey = M.shiftDays(state.repWeekKey || startOfWeek(M.todayKey()), 7);
+      renderReport();
+    });
+    $('repWeekThis').addEventListener('click', function () {
+      state.repWeekKey = startOfWeek(M.todayKey());
+      renderReport();
+    });
+
+    $('repMonthPrev').addEventListener('click', function () {
+      state.repMonthKey = M.shiftMonth(state.repMonthKey || M.todayKey(), -1);
+      renderReport();
+    });
+    $('repMonthNext').addEventListener('click', function () {
+      state.repMonthKey = M.shiftMonth(state.repMonthKey || M.todayKey(), 1);
+      renderReport();
+    });
+    $('repMonthThis').addEventListener('click', function () {
+      state.repMonthKey = M.todayKey();
+      renderReport();
+    });
+
+    $('cmpPrevMonth').addEventListener('change', renderReport);
+    $('cmpPrevYear').addEventListener('change', renderReport);
   }
 
   function setReportRange(from, to) {
@@ -716,8 +1072,25 @@ window.DRB = window.DRB || {};
     var from = $('repFrom').value || M.shiftDays(M.todayKey(), -29);
     var to = $('repTo').value || M.todayKey();
     if (from > to) { toast('期間の始めと終わりが逆になっています。'); return; }
-    state.report = X.analyze(state.cfg, state.bookings, state.patients, from, to);
-    C.renderReport(state.cfg, state.report);
+
+    if (!state.repWeekKey) state.repWeekKey = startOfWeek(M.todayKey());
+    if (!state.repMonthKey) state.repMonthKey = M.todayKey();
+
+    state.report = { from: from, to: to };
+    DRB.analytics.render({
+      cfg: state.cfg,
+      bookings: state.bookings,
+      patients: state.patients,
+      messages: state.messages,
+      contacts: state.contacts,
+      from: from, to: to,
+      weekStartKey: state.repWeekKey,
+      monthKey: state.repMonthKey,
+      compare: {
+        prevMonth: $('cmpPrevMonth').checked,
+        prevYear: $('cmpPrevYear').checked
+      }
+    });
   }
 
   /* ================= キャンセル待ち ================= */
@@ -762,6 +1135,30 @@ window.DRB = window.DRB || {};
           afterConfigChange();
           toast('設定を既定値に戻しました。');
         });
+    });
+
+    $('btnPurposeAdd').addEventListener('click', function () {
+      collectPurposes();
+      state.cfg.purposes.push({
+        key: 'p' + Date.now().toString(36),
+        label: '新しいご用件', color: '#6E757C',
+        span: 2, recallMonths: 6, grade: 'B', profit: 0
+      });
+      fillPurposeEditor();
+    });
+
+    /* 概算利益の入れ方を変えると貢献度の付き方が変わるので、その場で描き直す */
+    ['contribGrade', 'contribPerHour'].forEach(function (id) {
+      $(id).addEventListener('change', function () {
+        collectPurposes();
+        fillPurposeEditor();
+      });
+    });
+    $('purposeEditor').addEventListener('change', function (ev) {
+      if (ev.target.dataset.part === 'profit') {
+        collectPurposes();
+        fillPurposeEditor();
+      }
     });
 
     $('btnStaffAdd').addEventListener('click', function () {
@@ -872,6 +1269,27 @@ window.DRB = window.DRB || {};
     $('setSlot').value = String(cfg.slotMinutes);
     $('setUnits').value = String(cfg.units.length);
     $('setRecall').value = String(cfg.reminder.recallMonths);
+
+    D.fillSelect($('setRecallCh'), DRB.DM_CHANNELS, 'key', 'label');
+    $('setRecallCh').value = cfg.reminder.recallChannel || 'postcard';
+
+    [['setBufBefore', cfg.buffer.before], ['setBufAfter', cfg.buffer.after]].forEach(function (r) {
+      var sel = $(r[0]);
+      V.clear(sel);
+      DRB.BUFFER_OPTIONS.forEach(function (m) {
+        var o = V.el('option', null, m === 0 ? '空けない' : m + '分');
+        o.value = String(m);
+        sel.appendChild(o);
+      });
+      // 任意の分数を入れてあれば、その値も選べるようにしておく
+      if (DRB.BUFFER_OPTIONS.indexOf(Number(r[1])) === -1) {
+        var extra = V.el('option', null, r[1] + '分');
+        extra.value = String(r[1]);
+        sel.appendChild(extra);
+      }
+      sel.value = String(r[1] || 0);
+    });
+
     $('setHold').checked = cfg.holdColumn.enabled;
     $('setAutoConfirm').checked = cfg.reminder.autoConfirm;
     $('setEndpoint').value = cfg.storage.endpoint || '';
@@ -894,6 +1312,7 @@ window.DRB = window.DRB || {};
     }
 
     fillStaffEditor();
+    fillPurposeEditor();
   }
 
   function fillStaffEditor() {
@@ -934,6 +1353,137 @@ window.DRB = window.DRB || {};
     });
   }
 
+  /* ---- ご用件の設定 ---- */
+
+  function fillPurposeEditor() {
+    var host = $('purposeEditor');
+    V.clear(host);
+    var cfg = state.cfg;
+    var grades = DRB.gradeMap(cfg);
+    var auto = cfg.contribution.mode === 'perHour';
+
+    var head = V.el('div', 'purposehead');
+    ['ご用件', '色', 'お取りする枠', '定期健診', '貢献度', '概算利益（円）', ''].forEach(function (h) {
+      head.appendChild(V.el('span', null, h));
+    });
+    host.appendChild(head);
+
+    cfg.purposes.forEach(function (p, i) {
+      var row = V.el('div', 'purposerow');
+
+      var name = document.createElement('input');
+      name.type = 'text'; name.value = p.label;
+      name.dataset.purpose = String(i); name.dataset.part = 'label';
+      name.setAttribute('aria-label', 'ご用件の名前');
+      row.appendChild(name);
+
+      var color = document.createElement('input');
+      color.type = 'color'; color.value = p.color;
+      color.dataset.purpose = String(i); color.dataset.part = 'color';
+      color.setAttribute('aria-label', '色');
+      row.appendChild(color);
+
+      var span = document.createElement('select');
+      span.dataset.purpose = String(i); span.dataset.part = 'span';
+      span.setAttribute('aria-label', 'お取りする枠');
+      for (var n = 1; n <= 8; n++) {
+        var o = V.el('option', null, n + '枠（' + (n * cfg.slotMinutes) + '分）');
+        o.value = String(n);
+        span.appendChild(o);
+      }
+      span.value = String(p.span || 1);
+      row.appendChild(span);
+
+      var recall = document.createElement('select');
+      recall.dataset.purpose = String(i); recall.dataset.part = 'recallMonths';
+      recall.setAttribute('aria-label', '定期健診の標準期間');
+      [1, 2, 3, 4, 6, 12].forEach(function (m) {
+        var o = V.el('option', null, m + 'か月');
+        o.value = String(m);
+        recall.appendChild(o);
+      });
+      recall.value = String(p.recallMonths || 6);
+      row.appendChild(recall);
+
+      var grade = document.createElement('select');
+      grade.dataset.purpose = String(i); grade.dataset.part = 'grade';
+      grade.setAttribute('aria-label', '収益への貢献度');
+      DRB.GRADES.forEach(function (g) {
+        var o = V.el('option', null, g.key);
+        o.value = g.key;
+        grade.appendChild(o);
+      });
+      grade.value = p.grade || 'B';
+      grade.disabled = auto && Number(p.profit) > 0;
+      grade.title = grade.disabled ? '概算利益から自動で決めています。' : '';
+      row.appendChild(grade);
+
+      var profit = document.createElement('input');
+      profit.type = 'number'; profit.min = '0'; profit.step = '100';
+      profit.value = Number(p.profit) ? String(p.profit) : '';
+      profit.placeholder = '任意';
+      profit.dataset.purpose = String(i); profit.dataset.part = 'profit';
+      profit.setAttribute('aria-label', '1件あたりの概算利益');
+      row.appendChild(profit);
+
+      var tail = V.el('div');
+      if (auto && Number(p.profit) > 0) {
+        tail.appendChild(V.el('span', 'perhour',
+          '時間あたり ' + DRB.perHourOf(cfg, p).toLocaleString('ja-JP') + '円 → ' + grades[p.key]));
+      }
+      var del = V.el('button', 'btn btn--danger', '削除');
+      del.type = 'button';
+      del.addEventListener('click', function () { removePurpose(i); });
+      tail.appendChild(del);
+      row.appendChild(tail);
+
+      host.appendChild(row);
+    });
+
+    $('slotMinNote').textContent = String(cfg.slotMinutes);
+    $('contribGrade').checked = !auto;
+    $('contribPerHour').checked = auto;
+  }
+
+  /** 使われているご用件は消せない。過去の記録の表示が崩れるため。 */
+  function removePurpose(i) {
+    var cfg = state.cfg;
+    if (cfg.purposes.length <= 1) { toast('ご用件は少なくとも1つ必要です。'); return; }
+    var target = cfg.purposes[i];
+    var used = state.bookings.filter(function (b) { return b.purpose === target.key; }).length;
+
+    var ask = used
+      ? 'この「' + target.label + '」はご予約 ' + used + ' 件で使われています。削除すると、その記録のご用件が「ご用件未設定」と表示されるようになります。よろしいですか。'
+      : '「' + target.label + '」を削除します。よろしいですか。';
+
+    D.confirm('ご用件の削除', ask, '削除する').then(function (ok) {
+      if (!ok) return;
+      cfg.purposes.splice(i, 1);
+      DRB.saveConfig(cfg);
+      fillPurposeEditor();
+      renderAll();
+      toast('ご用件を削除しました。');
+    });
+  }
+
+  function collectPurposes() {
+    var cfg = state.cfg;
+    Array.prototype.forEach.call(
+      $('purposeEditor').querySelectorAll('[data-purpose]'),
+      function (input) {
+        var p = cfg.purposes[Number(input.dataset.purpose)];
+        if (!p) return;
+        var part = input.dataset.part;
+        if (part === 'span' || part === 'recallMonths' || part === 'profit') {
+          p[part] = Number(input.value) || (part === 'profit' ? 0 : 1);
+        } else {
+          p[part] = input.value;
+        }
+      }
+    );
+    cfg.contribution.mode = $('contribPerHour').checked ? 'perHour' : 'grade';
+  }
+
   function applySetup() {
     var cfg = state.cfg;
     cfg.clinicName = $('setClinic').value.trim() || DRB.defaultConfig.clinicName;
@@ -941,7 +1491,11 @@ window.DRB = window.DRB || {};
     cfg.slotMinutes = Number($('setSlot').value);
     cfg.holdColumn.enabled = $('setHold').checked;
     cfg.reminder.recallMonths = Number($('setRecall').value);
+    cfg.reminder.recallChannel = $('setRecallCh').value;
     cfg.reminder.autoConfirm = $('setAutoConfirm').checked;
+    cfg.buffer.before = Number($('setBufBefore').value) || 0;
+    cfg.buffer.after = Number($('setBufAfter').value) || 0;
+    collectPurposes();
 
     var want = Number($('setUnits').value);
     var units = [];
@@ -1094,16 +1648,19 @@ window.DRB = window.DRB || {};
 
   /* ================= デモデータ ================= */
 
-  /* 過去3か月ぶんで分析タブが埋まり、先1か月ぶんで月間の空きが埋まるようにする。
-     開いた日を起点に組み立てるので、いつ開いてもデモが古くならない。 */
+  /* 管理者が決めた期間（DEMO_RANGE）ぶんを作り直す。ここがデモの基準値になる。 */
   function seedDemo() {
-    var data = DRB.buildSeed(state.cfg, M.shiftDays(M.todayKey(), -92), 123);
+    var range = DRB.DEMO_RANGE;
+    var days = Math.round(
+      (M.fromKey(range.to) - M.fromKey(range.from)) / 86400000
+    ) + 1;
+    var data = DRB.buildSeed(state.cfg, range.from, days);
     return state.store.replace('bookings', data.bookings)
       .then(function () { return state.store.replace('patients', data.patients); })
       .then(function () { return replaceLocal('contacts', data.contacts); })
       .then(function () { return replaceLocal('messages', data.messages); })
       .then(function () { return replaceLocal('waitlist', data.waitlist); })
-      .then(function () { localStorage.setItem(SEEDED_KEY, '1'); })
+      .then(function () { localStorage.setItem(SEEDED_KEY, M.todayKey()); })
       .then(reload);
   }
 

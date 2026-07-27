@@ -4,7 +4,47 @@ window.DRB = window.DRB || {};
 (function (DRB) {
   'use strict';
 
-  DRB.CONFIG_KEY = 'drb.config.v2';
+  DRB.CONFIG_KEY = 'drb.config.v3';
+
+  /* デモデータの期間。管理者が決める基準値で、毎日1回ここへ戻す。 */
+  DRB.DEMO_RANGE = { from: '2025-01-01', to: '2027-01-31' };
+
+  /* ご予約を受け付けた経路 */
+  DRB.SOURCES = [
+    { key: 'reception', label: '窓口' },
+    { key: 'phone', label: 'お電話' },
+    { key: 'web', label: 'ウェブ' },
+    { key: 'mail', label: 'メール' },
+    { key: 'line', label: 'LINE' }
+  ];
+
+  /* ご案内をお届けする手段。ハガキは印刷してお出しするので、記録だけを残す。 */
+  DRB.DM_CHANNELS = [
+    { key: 'postcard', label: 'ハガキ', short: 'ハガキ', sendable: false },
+    { key: 'mail', label: 'メール', short: 'メール', sendable: true },
+    { key: 'line', label: 'LINE', short: 'LINE', sendable: false }
+  ];
+
+  /* 患者さんごとの定期健診の間隔 */
+  DRB.RECALL_OPTIONS = [
+    { value: -1, label: 'ご案内しない' },
+    { value: 0, label: '医院の既定にあわせる' },
+    { value: 1, label: '1か月' },
+    { value: 2, label: '2か月' },
+    { value: 3, label: '3か月' },
+    { value: 4, label: '4か月' },
+    { value: 6, label: '6か月' },
+    { value: 12, label: '12か月' }
+  ];
+
+  /* 収益への貢献度。院長が選ぶだけで済むよう、既定は3段階。 */
+  DRB.GRADES = [
+    { key: 'A', label: 'A（高い）', color: '#2E7D6B' },
+    { key: 'B', label: 'B（ふつう）', color: '#3B6FA8' },
+    { key: 'C', label: 'C（低い）', color: '#9a948c' }
+  ];
+
+  DRB.BUFFER_OPTIONS = [0, 15, 30];
 
   /* 予約の進み具合。受付が押していく順に並べている。 */
   DRB.STATUSES = [
@@ -106,19 +146,27 @@ window.DRB = window.DRB || {};
       '2026-09-21', '2026-09-23', '2026-10-12', '2026-11-03',
       '2026-11-23'
     ],
+    /* grade＝院長が選ぶ収益への貢献度。profit＝1件あたりの概算利益（0は未設定）。 */
     purposes: [
-      { key: 'maintenance', label: '定期メンテナンス', color: '#2E7D6B', span: 3, recallMonths: 6 },
-      { key: 'caries', label: 'う蝕処置', color: '#3B6FA8', span: 2, recallMonths: 6 },
-      { key: 'urgent', label: '痛み・当日対応', color: '#C0522F', span: 2, recallMonths: 3 },
-      { key: 'prosthetic', label: '補綴（詰め物・被せ物）', color: '#7B5EA7', span: 2, recallMonths: 6 },
-      { key: 'perio', label: '歯周治療', color: '#1F7A8C', span: 3, recallMonths: 3 },
-      { key: 'consult', label: '相談・カウンセリング', color: '#6E757C', span: 1, recallMonths: 12 }
+      { key: 'maintenance', label: '定期メンテナンス', color: '#2E7D6B', span: 3, recallMonths: 6, grade: 'A', profit: 0 },
+      { key: 'caries', label: 'う蝕処置', color: '#3B6FA8', span: 2, recallMonths: 6, grade: 'B', profit: 0 },
+      { key: 'urgent', label: '痛み・当日対応', color: '#C0522F', span: 2, recallMonths: 3, grade: 'C', profit: 0 },
+      { key: 'prosthetic', label: '補綴（詰め物・被せ物）', color: '#7B5EA7', span: 2, recallMonths: 6, grade: 'A', profit: 0 },
+      { key: 'perio', label: '歯周治療', color: '#1F7A8C', span: 3, recallMonths: 3, grade: 'A', profit: 0 },
+      { key: 'consult', label: '相談・カウンセリング', color: '#6E757C', span: 1, recallMonths: 12, grade: 'C', profit: 0 }
     ],
+
+    /* 貢献度の付け方。grade＝ABCをそのまま使う／perHour＝概算利益から時間あたりで自動採点 */
+    contribution: { mode: 'grade' },
+
+    /* ご予約の前後に空けておく時間（分）。片付けや説明の時間を見込むための設定。 */
+    buffer: { before: 0, after: 0 },
     templates: TPL,
     reminder: {
-      autoConfirm: true,   // 登録したら確定メールを送る
-      prevDay: true,       // 前日リマインドの対象にする
-      recallMonths: 6      // 最終来院からこの月数で案内の候補にする
+      autoConfirm: true,     // 登録したら確定メールを送る
+      prevDay: true,         // 前日リマインドの対象にする
+      recallMonths: 6,       // 最終来院からこの月数で案内の候補にする
+      recallChannel: 'postcard'  // 定期健診のご案内はハガキでお出しする
     },
     storage: {
       mode: 'local', // 'local' | 'sheet'
@@ -136,10 +184,17 @@ window.DRB = window.DRB || {};
         var saved = JSON.parse(raw);
         Object.keys(saved).forEach(function (k) { cfg[k] = saved[k]; });
         // 版が上がって増えた枝が欠けていても落ちないようにする
-        ['templates', 'reminder', 'storage', 'holdColumn'].forEach(function (k) {
+        ['templates', 'reminder', 'storage', 'holdColumn', 'contribution', 'buffer'].forEach(function (k) {
           cfg[k] = merge(DRB.defaultConfig[k], cfg[k]);
         });
         if (!cfg.staff || !cfg.staff.length) cfg.staff = DRB.clone(DRB.defaultConfig.staff);
+        if (!cfg.purposes || !cfg.purposes.length) cfg.purposes = DRB.clone(DRB.defaultConfig.purposes);
+        // 版が上がって増えた項目は既定値で埋める
+        cfg.purposes.forEach(function (p) {
+          if (!p.grade) p.grade = 'B';
+          if (typeof p.profit !== 'number') p.profit = 0;
+          if (typeof p.recallMonths !== 'number') p.recallMonths = 6;
+        });
       }
     } catch (e) {
       console.warn('設定の読み込みに失敗したため既定値を使います', e);
@@ -174,5 +229,51 @@ window.DRB = window.DRB || {};
   DRB.staffOf = function (cfg, id) {
     for (var i = 0; i < cfg.staff.length; i++) if (cfg.staff[i].id === id) return cfg.staff[i];
     return null;
+  };
+
+  DRB.sourceLabel = function (key) {
+    for (var i = 0; i < DRB.SOURCES.length; i++) {
+      if (DRB.SOURCES[i].key === key) return DRB.SOURCES[i].label;
+    }
+    return '窓口';
+  };
+
+  DRB.channelOf = function (key) {
+    for (var i = 0; i < DRB.DM_CHANNELS.length; i++) {
+      if (DRB.DM_CHANNELS[i].key === key) return DRB.DM_CHANNELS[i];
+    }
+    return DRB.DM_CHANNELS[1];
+  };
+
+  /**
+   * ご用件ごとの収益貢献度を返す。
+   * 概算利益を入れた用件が1つでもあり、モードが perHour なら、
+   * 時間あたり利益の高い順に上位1/3をA・中1/3をB・下1/3をCとして付け直す。
+   * 利益を入れていない用件は院長が選んだ ABC をそのまま使う。
+   */
+  DRB.gradeMap = function (cfg) {
+    var map = {};
+    cfg.purposes.forEach(function (p) { map[p.key] = p.grade || 'B'; });
+    if (!cfg.contribution || cfg.contribution.mode !== 'perHour') return map;
+
+    var scored = cfg.purposes.filter(function (p) { return Number(p.profit) > 0; })
+      .map(function (p) {
+        var minutes = Math.max(1, (p.span || 1) * cfg.slotMinutes);
+        return { key: p.key, perHour: Number(p.profit) / minutes * 60 };
+      })
+      .sort(function (a, b) { return b.perHour - a.perHour; });
+
+    if (!scored.length) return map;
+    var third = Math.ceil(scored.length / 3);
+    scored.forEach(function (s, i) {
+      map[s.key] = i < third ? 'A' : (i < third * 2 ? 'B' : 'C');
+    });
+    return map;
+  };
+
+  DRB.perHourOf = function (cfg, purpose) {
+    if (!Number(purpose.profit)) return 0;
+    var minutes = Math.max(1, (purpose.span || 1) * cfg.slotMinutes);
+    return Math.round(Number(purpose.profit) / minutes * 60);
   };
 })(window.DRB);

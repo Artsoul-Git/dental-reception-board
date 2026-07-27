@@ -174,36 +174,106 @@ window.DRB = window.DRB || {};
     });
   };
 
+  /* ---- ご案内の送信回数（媒体別） ---- */
+
+  /** 患者さんごとに、これまでお送りしたご案内の回数を媒体別に数える */
+  X.dmCountIndex = function (messages) {
+    var idx = {};
+    messages.forEach(function (m) {
+      if (m.kind !== 'recall' && m.kind !== 'dm') return;
+      if (m.state !== 'sent' && m.state !== 'simulated') return;
+      if (!m.patientId) return;
+      var c = idx[m.patientId] || (idx[m.patientId] = { mail: 0, line: 0, postcard: 0, total: 0 });
+      var ch = m.channel || 'mail';
+      if (c[ch] === undefined) c[ch] = 0;
+      c[ch]++;
+      c.total++;
+    });
+    return idx;
+  };
+
+  X.emptyDmCount = function () { return { mail: 0, line: 0, postcard: 0, total: 0 }; };
+
+  /** 「ハガキ：2回、メール：1回」のような表示用の文字列にする */
+  X.dmCountLabel = function (count) {
+    var c = count || X.emptyDmCount();
+    var parts = [];
+    window.DRB.DM_CHANNELS.forEach(function (ch) {
+      parts.push(ch.label + '：' + (c[ch.key] || 0) + '回');
+    });
+    return parts.join('　');
+  };
+
+  /** 最終来院からの経過月数（小数を切り捨てた整数） */
+  X.monthsSince = function (dateKey, baseKey) {
+    if (!dateKey) return null;
+    var a = M.fromKey(dateKey);
+    var b = M.fromKey(baseKey || M.todayKey());
+    var n = (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth());
+    if (b.getDate() < a.getDate()) n--;
+    return Math.max(0, n);
+  };
+
+  /** この患者さんの定期健診の間隔（月）。-1 はご案内しない */
+  X.recallMonthsOf = function (cfg, bookings, patient) {
+    var own = Number(patient.recallMonths);
+    if (own === -1) return -1;
+    if (own > 0) return own;
+    return purposeRecall(cfg, bookings, patient.id) || cfg.reminder.recallMonths;
+  };
+
+  /* 定期健診のご案内は、最終来院から2か月以上空いた方を土台にする */
+  X.RECALL_MIN_MONTHS = 2;
+
   /**
    * リコール（定期健診のご案内）の対象。
-   * 最終来院から一定期間が過ぎ、この先の予約が入っていない方。
+   * 最終来院から2か月以上空き、この先のご予約が入っていない方を並べる。
+   * opts.minMonths を渡すと「Nか月以上空いている方」に絞り込む。
    * 期間は患者ごとの設定を優先し、無ければ最後に受けた処置の標準期間、それも無ければ医院の既定。
    */
   X.recallTargets = function (cfg, bookings, patients, messages, opts) {
     var today = M.todayKey();
     var options = opts || {};
+    var floor = Math.max(X.RECALL_MIN_MONTHS, Number(options.minMonths) || 0);
+    var counts = X.dmCountIndex(messages);
+    var futureIdx = futureIndex(bookings, today);
     var out = [];
 
     patients.forEach(function (p) {
-      if (!p.email || p.mailOK === false) return;
-      if (X.nextBookingOf(bookings, p.id)) return;
+      if (futureIdx[p.id]) return;
 
       var last = p.lastVisit || X.lastVisitOf(bookings, p.id);
       if (!last) return;
 
-      var months = Number(p.recallMonths) || purposeRecall(cfg, bookings, p.id) || cfg.reminder.recallMonths;
+      var elapsed = X.monthsSince(last, today);
+      if (elapsed < floor) return;
+
+      var months = X.recallMonthsOf(cfg, bookings, p);
+      if (months === -1) return;
+
       var due = addMonths(last, months);
-      if (due > today) return;
       if (options.until && due > options.until) return;
 
-      // 直近90日で同じ案内を送っていれば見送る
+      // 直近90日で同じ案内をお出ししていれば見送る
       if (recentlySent(messages, p.id, 'recall', 90)) return;
 
-      out.push(buildRecall(cfg, p, last, due, months));
+      out.push(buildRecall(cfg, p, last, due, months, elapsed, counts[p.id]));
     });
 
-    return out.sort(function (a, b) { return a.due.localeCompare(b.due); });
+    // 空いている期間が長い方から先に出す
+    return out.sort(function (a, b) { return b.elapsed - a.elapsed || a.due.localeCompare(b.due); });
   };
+
+  /** 患者IDごとに「この先のご予約があるか」を1度だけ作る（毎回の全走査を避ける） */
+  function futureIndex(bookings, today) {
+    var idx = {};
+    bookings.forEach(function (b) {
+      if (!b.patientId || !M.isActive(b) || b.date < today) return;
+      idx[b.patientId] = true;
+    });
+    return idx;
+  }
+  X.futureIndex = futureIndex;
 
   function purposeRecall(cfg, bookings, patientId) {
     var visits = bookings.filter(function (b) {
@@ -249,12 +319,13 @@ window.DRB = window.DRB || {};
   }
   X.buildOutgoing = buildOutgoing;
 
-  function buildRecall(cfg, patient, last, due, months) {
+  function buildRecall(cfg, patient, last, due, months, elapsed, counts) {
     var rendered = X.renderTemplate(cfg, cfg.templates.recall, {
       name: patient.name, cardNo: patient.cardNo, lastVisit: last
     });
     return {
       kind: 'recall',
+      channel: cfg.reminder.recallChannel || 'postcard',
       to: patient.email,
       name: patient.name,
       patientId: patient.id,
@@ -263,7 +334,10 @@ window.DRB = window.DRB || {};
       body: rendered.body,
       due: due,
       months: months,
-      when: '前回 ' + M.formatDateLong(last) + '（' + months + 'か月経過）'
+      elapsed: elapsed,
+      counts: counts || X.emptyDmCount(),
+      hasLine: !!patient.lineId,
+      when: '前回 ' + M.formatDateLong(last) + '（' + elapsed + 'か月経過）'
     };
   }
 
@@ -311,7 +385,7 @@ window.DRB = window.DRB || {};
       id: 'wl-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6),
       patientId: '', name: '', phone: '',
       wantFrom: M.todayKey(), wantTo: M.shiftDays(M.todayKey(), 30),
-      prefer: 'any', purpose: 'maintenance', note: '',
+      prefer: 'any', purpose: 'maintenance', staffId: '', note: '',
       state: 'waiting', createdAt: new Date().toISOString()
     };
     Object.keys(fields || {}).forEach(function (k) { w[k] = fields[k]; });
@@ -397,7 +471,171 @@ window.DRB = window.DRB || {};
     };
   };
 
+  /**
+   * お知らせタブのバッジ用に、送るべき件数だけを数える。
+   * 文面を組み立てないので、患者さんが数千名いても軽い。
+   */
+  X.countNotify = function (cfg, bookings, patients, messages) {
+    var today = M.todayKey();
+    var tomorrow = M.shiftDays(today, 1);
+    var byId = {};
+    patients.forEach(function (p) { byId[p.id] = p; });
+
+    var sent = {};
+    var recallAt = {};
+    messages.forEach(function (m) {
+      if (m.state !== 'sent' && m.state !== 'simulated') return;
+      if (m.bookingId) sent[m.bookingId + '|' + m.kind] = true;
+      if (m.kind === 'recall' && m.patientId) {
+        if (!recallAt[m.patientId] || m.at > recallAt[m.patientId]) recallAt[m.patientId] = m.at;
+      }
+    });
+
+    var future = X.futureIndex(bookings, today);
+    var n = 0;
+
+    bookings.forEach(function (b) {
+      if (!M.isActive(b)) return;
+      var p = byId[b.patientId];
+      var mail = b.email || (p ? p.email : '');
+      if (!mail || (p && p.mailOK === false)) return;
+      if (b.date === tomorrow && !sent[b.id + '|reminder']) n++;
+      else if (b.date === today && b.status === 'done' && !sent[b.id + '|thanks']) n++;
+    });
+
+    var limit = new Date();
+    limit.setDate(limit.getDate() - 90);
+
+    patients.forEach(function (p) {
+      if (future[p.id]) return;
+      var last = p.lastVisit;
+      if (!last) return;
+      if (X.monthsSince(last, today) < X.RECALL_MIN_MONTHS) return;
+      if (Number(p.recallMonths) === -1) return;
+      if (recallAt[p.id] && new Date(recallAt[p.id]) >= limit) return;
+      n++;
+    });
+
+    return n;
+  };
+
   X.newMessageId = function () {
     return 'ms-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 6);
+  };
+
+  /* ================= キャンセルの扱い ================= */
+
+  /** 枠を他の方へ振り替えられるだけの余裕があるか（既定は2時間前まで） */
+  X.HANDOVER_HOURS = 2;
+
+  X.hoursUntil = function (booking, now) {
+    var at = M.fromKey(booking.date);
+    var mins = M.toMinutes(booking.time);
+    at.setHours(Math.floor(mins / 60), mins % 60, 0, 0);
+    return (at.getTime() - (now || new Date()).getTime()) / 3600000;
+  };
+
+  /**
+   * 取り消したあと、その枠を空きに戻してよいか。
+   * 直前すぎて他の方へ振り替えられない場合は、枠に「キャンセル」として残す。
+   */
+  X.shouldHoldSlot = function (booking, now) {
+    return X.hoursUntil(booking, now) < X.HANDOVER_HOURS;
+  };
+
+  /**
+   * 取り消したご予約の代わりにご案内できる日時を探す。
+   * その予約の afterHours 時間より後から、日付順に n 件。
+   */
+  X.rebookSuggestions = function (cfg, bookings, booking, n, afterHours) {
+    var limit = Number(n) || 3;
+    var gap = afterHours === undefined ? 3 : afterHours;
+    var startMin = M.toMinutes(booking.time) + gap * 60;
+    var out = [];
+    var key = booking.date;
+    var guard = 0;
+
+    while (out.length < limit && guard++ < 60) {
+      if (!M.isClosed(cfg, key)) {
+        var opens = M.openingTimes(cfg, key, bookings, booking.purpose);
+        for (var i = 0; i < opens.length && out.length < limit; i++) {
+          // 初日は「その予約の◯時間後」より前を飛ばす
+          if (key === booking.date && M.toMinutes(opens[i].time) < startMin) continue;
+          out.push({ date: key, time: opens[i].time, unit: opens[i].unit });
+        }
+      }
+      key = M.shiftDays(key, 1);
+    }
+    return out;
+  };
+
+  /** 再予約のご案内文。空き枠は確約でないことを必ず添える。 */
+  X.rebookMailBody = function (cfg, booking, patient, suggestions) {
+    var lines = [];
+    lines.push((booking.name || (patient && patient.name) || '') + ' 様');
+    lines.push('');
+    lines.push(cfg.clinicName + 'です。');
+    lines.push('お電話を差し上げましたが、おつなぎできませんでしたのでご連絡いたします。');
+    lines.push('');
+    lines.push('下記のご予約を取り消しといたしました。');
+    lines.push('');
+    lines.push('　日時　' + M.formatDateFull(booking.date) + ' ' + booking.time);
+    lines.push('　内容　' + M.purposeOf(cfg, booking.purpose).label);
+    lines.push('');
+
+    if (suggestions && suggestions.length) {
+      lines.push('あらためてのご予約について、下記のお日にちが空いております。');
+      lines.push('');
+      suggestions.forEach(function (s) {
+        lines.push('　・' + M.formatDateFull(s.date) + ' ' + s.time + '〜');
+      });
+      lines.push('');
+      lines.push('ご希望のお日にちを、お電話またはこのメールへのご返信でお知らせください。');
+      lines.push('');
+      lines.push('※ 上記はこのご案内をお出しした時点の空き状況です。');
+      lines.push('　 お申し出のタイミングによっては、すでに埋まっている場合がございます。');
+      lines.push('　 その際は近いお日にちをあらためてご案内いたしますので、ご容赦ください。');
+    } else {
+      lines.push('あらためてのご予約をご希望の際は、お電話にてご連絡ください。');
+    }
+
+    lines.push('');
+    lines.push('──────────');
+    lines.push(cfg.clinicName);
+    lines.push('お電話　' + cfg.tel);
+    lines.push('──────────');
+    return lines.join('\n');
+  };
+
+  /* ================= タグ ================= */
+
+  /** 台帳にあるタグを、使われている数の多い順に返す */
+  X.allTags = function (patients) {
+    var count = {};
+    patients.forEach(function (p) {
+      (p.tags || []).forEach(function (t) {
+        var key = String(t).trim();
+        if (key) count[key] = (count[key] || 0) + 1;
+      });
+    });
+    return Object.keys(count).sort(function (a, b) {
+      return count[b] - count[a] || a.localeCompare(b, 'ja');
+    }).map(function (t) { return { name: t, n: count[t] }; });
+  };
+
+  /* ================= 直近の未処理のご予約 ================= */
+
+  /**
+   * その患者さんの「まだ終わっていないご予約」のうち、いちばん近いもの。
+   * 台帳から直接なおせるようにするために使う。
+   */
+  X.nextOpenBooking = function (bookings, patientId) {
+    var today = M.todayKey();
+    var list = bookings.filter(function (b) {
+      if (b.patientId !== patientId || !M.isActive(b)) return false;
+      if (b.status === 'done') return false;
+      return b.date >= today;
+    }).sort(function (a, b) { return (a.date + a.time).localeCompare(b.date + b.time); });
+    return list[0] || null;
   };
 })(window.DRB);

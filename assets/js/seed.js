@@ -55,14 +55,16 @@ window.DRB = window.DRB || {};
 
       // 連絡先はデモ用。ドメインは受信できない example.jp を使う
       var hasMail = rnd() > 0.18;
+      var hasLine = rnd() > 0.55;
 
       patients.push({
-        id: 'pt-demo-' + cardNo,
+        id: 'p' + cardNo,
         cardNo: cardNo,
         name: SURNAMES[si] + ' ' + GIVEN[gi],
         kana: KANA_S[si] + ' ' + KANA_G[gi],
         phone: '090-' + String(1000 + Math.floor(rnd() * 8999)) + '-' + String(1000 + Math.floor(rnd() * 8999)),
         email: hasMail ? 'sample' + cardNo + '@example.jp' : '',
+        lineId: hasLine ? 'line-' + cardNo : '',
         birth: (1955 + Math.floor(rnd() * 60)) + '-' +
                ('0' + (1 + Math.floor(rnd() * 12))).slice(-2) + '-' +
                ('0' + (1 + Math.floor(rnd() * 28))).slice(-2),
@@ -70,7 +72,7 @@ window.DRB = window.DRB || {};
         address: '',
         firstVisit: '',
         lastVisit: '',
-        recallMonths: rnd() > 0.8 ? 3 : 0,
+        recallMonths: pick(rnd, [0, 0, 0, 0, 3, 3, 6, 1, 2, -1]),
         tags: tags,
         allergy: rnd() > 0.9 ? '金属アレルギーの申告あり' : '',
         medical: rnd() > 0.88 ? '降圧剤を服用中' : '',
@@ -92,21 +94,44 @@ window.DRB = window.DRB || {};
    */
   DRB.buildSeed = function (cfg, startKey, days) {
     var today = M.todayKey();
-    var patients = buildPatients(cfg, 60);
+
+    /* 歯科医院の実態に合わせ、患者さん1人あたり年3〜4回のご来院になる人数にする。
+       人数が少なすぎると「全員が毎月来ている」不自然なデータになり、
+       再来院率がすべて100%になってしまう。 */
+    var patients = buildPatients(cfg, 2200);
 
     /* 後ろの何人かは予約に登場させない。
        こうしておくと「しばらくお見えでない方」ができ、定期健診のご案内が意味を持つ。 */
-    var ACTIVE = 44;
+    var ACTIVE = 2000;
     var activePatients = patients.slice(0, ACTIVE);
+
+    /* いつから通い始めた方か。
+       6割はこの期間より前からの通院、4割は期間中に新しくお見えになった方とし、
+       「新しい患者さん」の数が月ごとに動くようにする。 */
+    var jr = seededRandom('join');
+    activePatients.forEach(function (p, i) {
+      p._join = jr() < 0.6 ? startKey : M.shiftDays(startKey, Math.floor(jr() * days));
+    });
+    activePatients.sort(function (a, b) { return a._join.localeCompare(b._join); });
+
+    var joined = [];
+    var joinPtr = 0;
     var bookings = [];
     var contacts = [];
     var messages = [];
     var lastVisitBy = {};
     var firstVisitBy = {};
+    var seq = 0;
 
     for (var d = 0; d < days; d++) {
       var key = M.shiftDays(startKey, d);
       if (M.isClosed(cfg, key)) continue;
+
+      // その日までに通い始めた方を候補に加える（日付順に進むので追加だけで済む）
+      while (joinPtr < activePatients.length && activePatients[joinPtr]._join <= key) {
+        joined.push(activePatients[joinPtr++]);
+      }
+      if (!joined.length) continue;
 
       var rnd = seededRandom(key);
       var slots = M.slotsOf(cfg, key);
@@ -128,11 +153,11 @@ window.DRB = window.DRB || {};
           for (var k = 0; k < span; k++) if (taken[(i + k) + ':' + unit.id]) conflict = true;
           if (conflict) { i++; continue; }
 
-          var p = activePatients[Math.floor(rnd() * activePatients.length)];
+          var p = joined[Math.floor(rnd() * joined.length)];
           var status = decideStatus(rnd, key, today, slots[i].time);
 
           var booking = {
-            id: 'seed-' + key + '-' + unit.id + '-' + i,
+            id: 's' + (seq++).toString(36),
             date: key,
             time: slots[i].time,
             span: span,
@@ -140,18 +165,21 @@ window.DRB = window.DRB || {};
             patientId: p.id,
             name: p.name,
             cardNo: p.cardNo,
-            phone: p.phone,
-            email: p.email,
+            // お電話・メールは台帳から引くので、デモの予約には持たせない（保存容量の節約）
+            phone: '',
+            email: '',
             purpose: purpose.key,
             memo: '',
             status: status,
             staffId: pick(rnd, cfg.staff).id,
-            source: rnd() > 0.6 ? 'phone' : 'reception',
+            source: pick(rnd, ['reception', 'phone', 'phone', 'web', 'mail', 'line']),
             arrivedAt: '', doneAt: '',
             cancelReason: status === 'canceled' ? pick(rnd, CANCEL_REASONS) : '',
             canceledAt: status === 'canceled' ? key : '',
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
+            // 直前のキャンセルは枠を空けずに残す
+            slotHeld: status === 'noshow' || (status === 'canceled' && rnd() > 0.7),
+            createdAt: '',
+            updatedAt: ''
           };
           bookings.push(booking);
 
@@ -184,11 +212,11 @@ window.DRB = window.DRB || {};
         bookings.push({
           id: 'seed-hold-' + key,
           date: key, time: slots[5].time, span: 2, unit: M.HOLD_UNIT,
-          patientId: hp.id, name: hp.name, cardNo: hp.cardNo, phone: hp.phone, email: hp.email,
+          patientId: hp.id, name: hp.name, cardNo: hp.cardNo, phone: '', email: '',
           purpose: 'urgent', memo: 'お電話で当日枠のご相談。左下の奥歯が痛むとのこと。',
           status: 'booked', staffId: cfg.staff[0].id, source: 'phone',
           arrivedAt: '', doneAt: '', cancelReason: '', canceledAt: '',
-          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString()
+          slotHeld: false, createdAt: '', updatedAt: ''
         });
         contacts.push(X.newContact(hp.id, {
           id: 'ct-hold-' + key,
@@ -215,18 +243,91 @@ window.DRB = window.DRB || {};
       p.firstVisit = X.addMonths(p.lastVisit, -(12 + Math.floor(stale() * 24)));
     });
 
-    /* 送信ログのサンプル（過去に確定メールを送った記録） */
+    /* 送信ログのサンプル。
+       ご予約の確定メールに加えて、過去にお出しした定期健診のご案内（ハガキ・メール・LINE）を
+       媒体を混ぜて残す。分析タブの「DM後のご来院率」がここから計算される。 */
     var mrnd = seededRandom('messages');
+    var mseq = 0;
+
     bookings.filter(function (b) {
-      return b.date < today && b.email && mrnd() > 0.75;
-    }).slice(0, 40).forEach(function (b) {
+      var p = X.findPatient(patients, b.patientId);
+      return b.date < today && p && p.email && mrnd() > 0.88;
+    }).forEach(function (b) {
       var out = X.buildOutgoing(cfg, b, X.findPatient(patients, b.patientId), 'confirm');
       messages.push({
-        id: 'ms-' + b.id,
-        patientId: b.patientId, bookingId: b.id, kind: 'confirm',
-        to: out.to, subject: out.subject, body: out.body,
+        id: 'm' + (mseq++).toString(36),
+        patientId: b.patientId, bookingId: b.id, kind: 'confirm', channel: 'mail',
+        to: out.to, subject: out.subject, body: '',
         at: b.date + 'T01:00:00.000Z', state: 'simulated', error: ''
       });
+    });
+
+    /* 定期健診のご案内の履歴。ハガキが主で、メール・LINEが混ざる。
+       分析タブの「ご案内後のご来院率」が意味を持つよう、
+       媒体ごとに効き目の差が出るように置く。実際にご来院につながった案内は
+       「ご来院日の5〜25日前」に、つながらなかった案内は
+       「そのあと30日はご来院がない時期」に置く。 */
+    var HIT_RATE = { postcard: 0.22, mail: 0.33, line: 0.46 };
+
+    // 患者さんごとのご来院日（昇順）
+    var visitsBy = {};
+    bookings.forEach(function (b) {
+      if (b.status !== 'done' && b.status !== 'checkout') return;
+      (visitsBy[b.patientId] || (visitsBy[b.patientId] = [])).push(b.date);
+    });
+    Object.keys(visitsBy).forEach(function (id) { visitsBy[id].sort(); });
+
+    function visitWithin(list, from, days) {
+      var to = M.shiftDays(from, days);
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] >= from && list[i] <= to) return true;
+        if (list[i] > to) break;
+      }
+      return false;
+    }
+
+    /* 過去にお出ししたぶんは記録として残すだけで、本文は保存しない
+       （画面で本文を出す場所がなく、保存容量だけを圧迫するため） */
+    function pushRecall(p, ch, at) {
+      var rendered = X.renderTemplate(cfg, cfg.templates.recall, {
+        name: p.name, cardNo: p.cardNo, lastVisit: p.lastVisit
+      });
+      messages.push({
+        id: 'm' + (mseq++).toString(36),
+        patientId: p.id, bookingId: '', kind: 'recall', channel: ch,
+        to: ch === 'mail' ? p.email : (ch === 'line' ? p.lineId : 'ハガキ'),
+        subject: rendered.subject, body: '',
+        at: at + 'T00:00:00.000Z', state: 'simulated', error: ''
+      });
+    }
+
+    patients.forEach(function (p) {
+      if (!p.lastVisit) return;
+      var times = Math.floor(mrnd() * 3);   // 0〜2回
+      var visits = visitsBy[p.id] || [];
+
+      for (var t = 0; t < times; t++) {
+        var ch = (p.lineId && mrnd() > 0.7) ? 'line'
+               : (p.email && mrnd() > 0.5) ? 'mail' : 'postcard';
+        var wantHit = mrnd() < HIT_RATE[ch];
+
+        if (wantHit && visits.length) {
+          // ご来院の少し前にお出ししたことにする
+          var v = visits[Math.floor(mrnd() * visits.length)];
+          var at = M.shiftDays(v, -(5 + Math.floor(mrnd() * 21)));
+          if (at < startKey || at >= today) continue;
+          pushRecall(p, ch, at);
+        } else {
+          // そのあと30日はご来院がない時期を探す（見つからなければ見送る）
+          for (var tryN = 0; tryN < 6; tryN++) {
+            var cand = M.shiftDays(p.lastVisit, 20 + Math.floor(mrnd() * 300));
+            if (cand < startKey || cand >= today) continue;
+            if (visitWithin(visits, cand, 30)) continue;
+            pushRecall(p, ch, cand);
+            break;
+          }
+        }
+      }
     });
 
     /* キャンセル待ちのサンプル */
@@ -243,6 +344,9 @@ window.DRB = window.DRB || {};
         createdAt: new Date(Date.now() - n * 86400000).toISOString()
       });
     });
+
+    // 組み立てに使っただけの項目は保存しない
+    patients.forEach(function (p) { delete p._join; });
 
     return {
       bookings: bookings, patients: patients,

@@ -994,7 +994,152 @@ td.is-hold .slot--free { background: repeating-linear-gradient(45deg, #fdfbf7, #
 .modal__note { font-size: 12.5px; color: var(--ink-mute); }
 .modal__body textarea { font-family: inherit; }
 
+/* ===== 取り消し済みで枠に残しているご予約 ===== */
+.slot--held {
+  background: #fbeef1 !important;
+  color: #8a6a72;
+}
+.slot--held .slot__name { text-decoration: line-through; }
+
+.slot__tag {
+  display: inline-block;
+  align-self: flex-start;
+  background: #c98a99;
+  color: #fff;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 1.5;
+  padding: 0 5px;
+  margin-bottom: 2px;
+}
+
+.cal__day.is-past { background: #f7f5f1; color: #bdb7ae; cursor: default; }
+
+/* ===== 連絡先の並び ===== */
+.contactline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 18px;
+  background: var(--card);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  font-size: 13px;
+}
+.contactline dt { color: var(--ink-mute); }
+.contactline dt::after { content: "："; }
+.contactline dd { margin-right: 10px; overflow-wrap: anywhere; }
+.contactline dd.is-none { color: var(--hold); }
+
+/* ===== 横並びの入力・チェック ===== */
+.field--inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+}
+.field--inline .field__label { white-space: nowrap; margin: 0; }
+.field--inline select {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  padding: 6px 10px;
+}
+
+.inlinechk {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.inlinechk input { width: 16px; height: 16px; flex: none; }
+
+.radiorow { display: grid; gap: 6px; margin-bottom: 10px; }
+
+.choices {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  margin: 12px 0;
+}
+.choices legend { font-size: 13px; font-weight: 700; padding: 0 6px; }
+.choices .field--check { align-items: flex-start; margin-top: 6px; }
+.choices small { color: var(--ink-mute); }
+
+/* ===== 送信候補の付帯情報 ===== */
+.outbox__counts {
+  display: inline-block;
+  margin-left: 10px;
+  background: #efeae1;
+  border-radius: 999px;
+  padding: 0 9px;
+  font-size: 11.5px;
+}
+.outbox__cycle { display: inline-block; margin-left: 8px; font-size: 11.5px; color: var(--accent-deep); }
+
+/* ===== 送信ログの宛先 ===== */
+.logto__name { display: block; }
+.logto__addr { display: block; font-size: 11.5px; color: var(--ink-mute); overflow-wrap: anywhere; }
+
+/* ===== タグの選択 ===== */
+.tagpick { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+
+.tagpick button {
+  appearance: none;
+  border: 1px solid var(--line);
+  background: var(--card);
+  border-radius: 999px;
+  padding: 2px 11px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.tagpick button:hover { background: #fbf9f5; }
+.tagpick button.is-on { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.tagadd { display: flex; gap: 6px; margin-top: 8px; }
+.tagadd input {
+  flex: 1;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: #fdfcfa;
+}
+
+/* ===== ご用件の設定 ===== */
+.purposed { display: grid; gap: 6px; margin-bottom: 10px; }
+
+.purposerow {
+  display: grid;
+  grid-template-columns: 1fr 3em 6.5em 7em 6.5em 8em auto;
+  gap: 6px;
+  align-items: center;
+}
+.purposerow input, .purposerow select {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 8px;
+  background: #fdfcfa;
+  min-width: 0;
+}
+.purposerow input[type="color"] { padding: 2px; height: 34px; }
+.purposerow .perhour { font-size: 11.5px; color: var(--ink-mute); text-align: right; }
+
+.purposehead {
+  display: grid;
+  grid-template-columns: 1fr 3em 6.5em 7em 6.5em 8em auto;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--ink-mute);
+}
+
 /* ===== 画面が狭いとき ===== */
+@media (max-width: 1000px) {
+  .purposerow, .purposehead { grid-template-columns: 1fr 1fr; }
+  .purposehead { display: none; }
+}
+
 @media (max-width: 900px) {
   .split { grid-template-columns: 1fr; }
   .ptlist { max-height: 40vh; }

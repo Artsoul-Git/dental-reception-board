@@ -79,8 +79,9 @@ window.DRB = window.DRB || {};
 
     fillSelect($('bkPurpose'), cfg.purposes, 'key', 'label');
     fillSelect($('bkStaff'), cfg.staff, 'id', 'name', '担当を決めない');
+    fillSelect($('bkSource'), window.DRB.SOURCES, 'key', 'label');
 
-    var maxSpan = M.maxSpanAt(opts.grid, opts.slotIndex, opts.unit, editing ? b.id : null);
+    var maxSpan = M.maxSpanAt(opts.grid, opts.slotIndex, opts.unit, editing ? b.id : null, cfg);
     var spanSel = $('bkSpan');
     clear(spanSel);
     for (var n = 1; n <= Math.max(1, maxSpan); n++) {
@@ -164,7 +165,7 @@ window.DRB = window.DRB || {};
           return;
         }
         var span = Number(spanSel.value) || 1;
-        if (!M.canPlace(opts.grid, opts.slotIndex, opts.unit, span, editing ? b.id : null)) {
+        if (!M.canPlace(opts.grid, opts.slotIndex, opts.unit, span, editing ? b.id : null, cfg)) {
           $('bookingErr').textContent = 'その長さでは次のご予約と重なります。枠数を短くしてください。';
           $('bookingErr').hidden = false;
           return;
@@ -206,9 +207,12 @@ window.DRB = window.DRB || {};
   /* ================= 予約の内容 ================= */
 
   /** @returns Promise<'close'|'cancel'|'noshow'|'edit'|'print'|'patient'|{advance:key}> */
-  D.openDetail = function (cfg, booking) {
+  D.openDetail = function (cfg, booking, patient) {
     var body = $('detailBody');
     clear(body);
+
+    $('detailWho').textContent = booking.name + ' 様';
+    D.fillContactLine('detailContact', booking, patient);
 
     /* 進み具合をボタンで直接選べるようにする */
     var bar = $('detailStatus');
@@ -231,12 +235,11 @@ window.DRB = window.DRB || {};
       ['日時', M.formatDateFull(booking.date) + '　' + booking.time + '〜' + end],
       ['場所', M.columnLabel(cfg, booking.unit)],
       ['お名前', booking.name + ' 様'],
-      ['診察券番号', booking.cardNo || '（未登録）'],
-      ['お電話', booking.phone || '（未登録）'],
-      ['メール', booking.email || '（未登録）'],
+      ['診察券番号', booking.cardNo || (patient && patient.cardNo) || '（未登録）'],
       ['ご用件', M.purposeOf(cfg, booking.purpose).label],
       ['担当', staff ? staff.name : '（決めていません）'],
-      ['いまの状態', st.label],
+      ['受け付けた経路', window.DRB.sourceLabel(booking.source)],
+      ['いまの状態', st.label + (M.isHeld(booking) ? '（枠は空きに戻していません）' : '')],
       ['受付メモ', booking.memo || '（なし）']
     ];
     if (booking.cancelReason) rows.push(['取り消しの理由', booking.cancelReason]);
@@ -258,40 +261,141 @@ window.DRB = window.DRB || {};
     }).then(function (v) { return v || 'close'; });
   };
 
+  /* ================= 連絡先の表示 ================= */
+
+  /**
+   * お電話・メール・LINEの登録状況を並べる。
+   * 無断キャンセルの応対では「どこへ連絡できるか」がその場で要るため、必ず出す。
+   */
+  D.fillContactLine = function (hostId, booking, patient) {
+    var host = $(hostId);
+    clear(host);
+    var p = patient || {};
+    [
+      ['お電話', booking.phone || p.phone],
+      ['メール', booking.email || p.email],
+      ['LINE', p.lineId ? '登録あり' : '']
+    ].forEach(function (r) {
+      host.appendChild(el('dt', null, r[0]));
+      var dd = el('dd', r[1] ? null : 'is-none', r[1] || '未登録');
+      host.appendChild(dd);
+    });
+  };
+
   /* ================= キャンセル ================= */
 
-  /** @returns Promise<{reason, sendMail, addContact, noshow}|null> */
-  D.openCancel = function (cfg, booking, noshow) {
-    $('cancelTitle').textContent = noshow ? '無断キャンセルとして記録' : 'ご予約の取り消し';
+  /**
+   * 取り消しの受け付け。ここでは「何をするか」を決めるだけで、保存はしない。
+   * やめた場合は null を返し、呼び出し側はご予約を元のままにする。
+   * @returns Promise<{reason, follow, addContact, noshow, holdSlot}|null>
+   */
+  D.openCancel = function (cfg, booking, patient, noshow) {
+    $('cancelTitle').textContent = noshow ? '無断キャンセルの処理' : 'ご予約の取り消し';
     $('cancelWho').textContent =
       booking.name + ' 様　' + M.formatDateFull(booking.date) + ' ' + booking.time +
       '　' + M.purposeOf(cfg, booking.purpose).label;
-    $('cxYes').textContent = noshow ? '無断キャンセルにする' : '取り消す';
-    $('cxReason').value = noshow ? 'ご都合により' : 'ご都合により';
+
+    D.fillContactLine('cxContactInfo', booking, patient);
+
+    $('cxReason').value = noshow ? 'ご連絡なくお見えになりませんでした' : 'ご都合により';
     $('cxNote').value = '';
-    $('cxMail').checked = !noshow && !!booking.email;
-    $('cxMail').disabled = !booking.email;
     $('cxContact').checked = true;
+    $('cxFollowNone').checked = true;
+
+    var hold = noshow || X.shouldHoldSlot(booking);
+    $('cxSlotNote').textContent = hold
+      ? 'この枠は他の方へ振り替えられる時間ではないため、空きには戻さず「キャンセル」として盤面に残します。'
+      : 'お時間に余裕があるため、処理が終わるとこの枠は空きに戻ります。';
 
     return run($('dlgCancel'), function (on, done) {
       on($('cancelForm'), 'submit', function (ev) {
         ev.preventDefault();
         var reason = $('cxReason').value;
         var note = $('cxNote').value.trim();
+        var follow = 'none';
+        ['cxFollowMail', 'cxFollowRebook', 'cxFollowNone'].forEach(function (id) {
+          if ($(id).checked) follow = $(id).value;
+        });
         done({
           reason: [reason, note].filter(Boolean).join('／') || '理由の記載なし',
-          sendMail: $('cxMail').checked && !$('cxMail').disabled,
+          follow: follow,
           addContact: $('cxContact').checked,
-          noshow: !!noshow
+          noshow: !!noshow,
+          holdSlot: hold
         });
       });
       on($('cxNo'), 'click', function () { done(null); });
     });
   };
 
+  /* ================= 振替のご予約 ================= */
+
+  /**
+   * 月間の空きから振替先を選んでいただく。
+   * ご用件と担当医は元のご予約のものを最初から入れておく。
+   * @param opts { cfg, bookings, booking, patient, onPick(dateKey,time,unit,purpose,staffId) }
+   * @returns Promise<'closed'>
+   */
+  D.openRebook = function (opts) {
+    var cfg = opts.cfg;
+    var V = window.DRB.views;
+    // 過ぎたご予約の振替でも、候補は今日から先だけを出す
+    var floorKey = M.todayKey();
+    var monthKey = opts.booking.date > floorKey ? opts.booking.date : floorKey;
+    var selected = null;
+
+    $('rbWho').textContent =
+      opts.booking.name + ' 様　（元のご予約：' +
+      M.formatDateFull(opts.booking.date) + ' ' + opts.booking.time + '）';
+    $('rbDone').hidden = true;
+
+    fillSelect($('rbPurpose'), cfg.purposes, 'key', 'label');
+    fillSelect($('rbStaff'), cfg.staff, 'id', 'name', '担当を決めない');
+    $('rbPurpose').value = opts.booking.purpose;
+    $('rbStaff').value = opts.booking.staffId || '';
+
+    function draw() {
+      $('rbCaption').textContent = M.formatMonth(monthKey);
+      V.renderMonthInto({
+        host: $('rbCal'),
+        cfg: cfg, bookings: opts.bookings, monthKey: monthKey,
+        selectedKey: selected, minKey: floorKey,
+        purposeKey: $('rbPurpose').value,
+        onPickDay: function (key) { selected = key; draw(); }
+      });
+      V.renderMonthDetailInto({
+        host: $('rbDetail'),
+        cfg: cfg, bookings: opts.bookings, dateKey: selected,
+        purposeKey: $('rbPurpose').value,
+        onPickSlot: function (key, time, unit) {
+          opts.onPick(key, time, unit, $('rbPurpose').value, $('rbStaff').value);
+        }
+      });
+    }
+
+    D.rebookRedraw = draw;
+    D.rebookShowResult = function (text) {
+      $('rbDone').textContent = text;
+      $('rbDone').hidden = false;
+    };
+
+    draw();
+
+    return run($('dlgRebook'), function (on, done) {
+      on($('rbClose'), 'click', function () { done('closed'); });
+      on($('rbPrev'), 'click', function () { monthKey = M.shiftMonth(monthKey, -1); selected = null; draw(); });
+      on($('rbNext'), 'click', function () { monthKey = M.shiftMonth(monthKey, 1); selected = null; draw(); });
+      on($('rbPurpose'), 'change', draw);
+    }).then(function (v) {
+      D.rebookRedraw = null;
+      D.rebookShowResult = null;
+      return v;
+    });
+  };
+
   /* ================= 患者の登録・修正 ================= */
 
-  D.openPatient = function (cfg, patient) {
+  D.openPatient = function (cfg, patient, allPatients) {
     var editing = !!patient;
     var p = patient || X.blankPatient();
 
@@ -303,14 +407,49 @@ window.DRB = window.DRB || {};
     $('ptBirth').value = p.birth || '';
     $('ptPhone').value = p.phone || '';
     $('ptEmail').value = p.email || '';
+    $('ptLine').value = p.lineId || '';
     $('ptAddress').value = p.address || '';
-    $('ptRecall').value = String(Number(p.recallMonths) || 0);
-    $('ptTags').value = (p.tags || []).join(', ');
     $('ptAllergy').value = p.allergy || '';
     $('ptMedical').value = p.medical || '';
     $('ptNote').value = p.note || '';
     $('ptMailOK').checked = p.mailOK !== false;
     $('ptDmOK').checked = p.dmOK !== false;
+
+    fillSelect($('ptRecall'), window.DRB.RECALL_OPTIONS, 'value', 'label');
+    $('ptRecall').value = String(Number(p.recallMonths) || 0);
+
+    /* タグは押して選べるようにする。手で打ち込むこともできる。 */
+    var known = X.allTags(allPatients || []).map(function (t) { return t.name; });
+    (p.tags || []).forEach(function (t) { if (known.indexOf(t) === -1) known.push(t); });
+
+    function currentTags() {
+      return $('ptTags').value.split(/[,、]/)
+        .map(function (s) { return s.trim(); }).filter(Boolean);
+    }
+
+    function drawTags() {
+      var host = $('ptTagPick');
+      clear(host);
+      var on = currentTags();
+      known.forEach(function (name) {
+        var btn = el('button', on.indexOf(name) !== -1 ? 'is-on' : null, name);
+        btn.type = 'button';
+        btn.setAttribute('aria-pressed', String(on.indexOf(name) !== -1));
+        btn.addEventListener('click', function () {
+          var list = currentTags();
+          var at = list.indexOf(name);
+          if (at === -1) list.push(name); else list.splice(at, 1);
+          $('ptTags').value = list.join(', ');
+          drawTags();
+        });
+        host.appendChild(btn);
+      });
+      if (!known.length) host.appendChild(el('span', 'lead', 'まだタグがありません。下から追加できます。'));
+    }
+
+    $('ptTags').value = (p.tags || []).join(', ');
+    $('ptTagNew').value = '';
+    drawTags();
 
     return run($('dlgPatient'), function (on, done) {
       on($('patientForm'), 'submit', function (ev) {
@@ -328,10 +467,10 @@ window.DRB = window.DRB || {};
         out.birth = $('ptBirth').value;
         out.phone = $('ptPhone').value.trim();
         out.email = $('ptEmail').value.trim();
+        out.lineId = $('ptLine').value.trim();
         out.address = $('ptAddress').value.trim();
-        out.recallMonths = Number($('ptRecall').value) || 0;
-        out.tags = $('ptTags').value.split(/[,、]/)
-          .map(function (s) { return s.trim(); }).filter(Boolean);
+        out.recallMonths = Number($('ptRecall').value);
+        out.tags = currentTags();
         out.allergy = $('ptAllergy').value.trim();
         out.medical = $('ptMedical').value.trim();
         out.note = $('ptNote').value.trim();
@@ -340,6 +479,17 @@ window.DRB = window.DRB || {};
         done(out);
       });
       on($('ptCancelBtn'), 'click', function () { done(null); });
+      on($('ptTags'), 'input', drawTags);
+      on($('btnTagAdd'), 'click', function () {
+        var name = $('ptTagNew').value.trim();
+        if (!name) return;
+        if (known.indexOf(name) === -1) known.push(name);
+        var list = currentTags();
+        if (list.indexOf(name) === -1) list.push(name);
+        $('ptTags').value = list.join(', ');
+        $('ptTagNew').value = '';
+        drawTags();
+      });
       setTimeout(function () { $('ptName').focus(); }, 0);
     });
   };
@@ -375,9 +525,11 @@ window.DRB = window.DRB || {};
   D.openWaitlist = function (cfg, prefill) {
     var pre = prefill || {};
     fillSelect($('wlPurpose'), cfg.purposes, 'key', 'label');
+    fillSelect($('wlStaff'), cfg.staff, 'id', 'name', 'どなたでも');
     $('wlName').value = pre.name || '';
     $('wlPhone').value = pre.phone || '';
     $('wlPurpose').value = pre.purpose || cfg.purposes[0].key;
+    $('wlStaff').value = pre.staffId || '';
     $('wlFrom').value = pre.wantFrom || M.todayKey();
     $('wlTo').value = pre.wantTo || M.shiftDays(M.todayKey(), 30);
     $('wlPrefer').value = pre.prefer || 'any';
@@ -396,6 +548,7 @@ window.DRB = window.DRB || {};
           wantTo: $('wlTo').value,
           prefer: $('wlPrefer').value,
           purpose: $('wlPurpose').value,
+          staffId: $('wlStaff').value,
           note: $('wlNote').value.trim()
         }));
       });

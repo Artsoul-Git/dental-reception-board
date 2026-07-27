@@ -22,18 +22,32 @@ window.DRB = window.DRB || {};
 
   /* ================= ブラウザ内保存 ================= */
 
-  function LocalAdapter() {}
+  /*
+   * 2年ぶんのご予約は1万件を超える。
+   * 保存のたびに全件を読み直して解析すると、1件の登録に数秒かかってしまうため、
+   * 解析した結果を手元に持っておき、書き込んだときだけ入れ替える。
+   */
+  function LocalAdapter() {
+    this.cache = {};
+  }
 
   LocalAdapter.prototype.name = 'ブラウザ内保存';
   LocalAdapter.prototype.canSendMail = false;
 
+  LocalAdapter.prototype.rows = function (box) {
+    var def = BOXES[box];
+    if (!this.cache[box]) this.cache[box] = read(def.key);
+    return this.cache[box];
+  };
+
   LocalAdapter.prototype.list = function (box) {
-    return Promise.resolve(read(BOXES[box].key));
+    // 中身は共有するが、並べ替えなどで元を壊さないよう入れ物だけ分ける
+    return Promise.resolve(this.rows(box).slice());
   };
 
   LocalAdapter.prototype.save = function (box, item) {
     var def = BOXES[box];
-    var all = read(def.key);
+    var all = this.rows(box);
     var i = indexOf(all, def.idField, item[def.idField]);
     if (i >= 0) all[i] = item; else all.push(item);
     write(def.key, all);
@@ -42,13 +56,15 @@ window.DRB = window.DRB || {};
 
   LocalAdapter.prototype.remove = function (box, id) {
     var def = BOXES[box];
-    write(def.key, read(def.key).filter(function (o) { return o[def.idField] !== id; }));
+    this.cache[box] = this.rows(box).filter(function (o) { return o[def.idField] !== id; });
+    write(def.key, this.cache[box]);
     return Promise.resolve();
   };
 
   LocalAdapter.prototype.replace = function (box, items) {
-    write(BOXES[box].key, items || []);
-    return Promise.resolve((items || []).length);
+    this.cache[box] = (items || []).slice();
+    write(BOXES[box].key, this.cache[box]);
+    return Promise.resolve(this.cache[box].length);
   };
 
   /**
@@ -74,10 +90,23 @@ window.DRB = window.DRB || {};
     return Promise.reject(new Error('「' + action + '」はスプレッドシート連携を設定してからお使いいただけます。'));
   };
 
+  /*
+   * ブラウザ内保存は容量に限りがある（おおむね5MB）。
+   * 2年分のご予約を1件ずつ {"date":"…","time":"…"} の形で持つと項目名だけで容量を使い切るため、
+   * 「項目名の並び」と「値の並び」に分けて持つ。中身は同じで、容量が3分の1ほどになる。
+   */
   function read(key) {
     try {
       var raw = localStorage.getItem(key);
-      return raw ? JSON.parse(raw) : [];
+      if (!raw) return [];
+      var data = JSON.parse(raw);
+      if (Array.isArray(data)) return data;          // 旧い形式もそのまま読める
+      if (!data || !data.f || !data.r) return [];
+      return data.r.map(function (row) {
+        var o = {};
+        for (var i = 0; i < data.f.length; i++) o[data.f[i]] = row[i];
+        return o;
+      });
     } catch (e) {
       console.warn('保存データの読み込みに失敗しました', e);
       return [];
@@ -85,7 +114,31 @@ window.DRB = window.DRB || {};
   }
 
   function write(key, value) {
-    localStorage.setItem(key, JSON.stringify(value));
+    var list = value || [];
+    var fields = [];
+    var seen = {};
+    list.forEach(function (o) {
+      Object.keys(o).forEach(function (k) {
+        if (!seen[k]) { seen[k] = true; fields.push(k); }
+      });
+    });
+    var packed = {
+      v: 1,
+      f: fields,
+      r: list.map(function (o) {
+        return fields.map(function (k) {
+          var v = o[k];
+          return v === undefined ? '' : v;
+        });
+      })
+    };
+    try {
+      localStorage.setItem(key, JSON.stringify(packed));
+    } catch (e) {
+      // 容量あふれは黙って握りつぶさない。画面側で気づけるようにする。
+      console.error('保存できませんでした（容量不足の可能性があります）', e);
+      throw new Error('この端末に保存できる量を超えました。「設定・連携」から不要なデータを整理してください。');
+    }
   }
 
   function indexOf(list, field, id) {

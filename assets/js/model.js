@@ -106,9 +106,23 @@ window.DRB = window.DRB || {};
    * 「slotIndex:unitId」→ 予約 の対応表を作る。
    * span が 2 以上の予約は、後続の枠も同じ予約で埋める（先頭かどうかは head で判別）。
    */
-  /** 取り消し済み・無断キャンセルは枠を空けるので、盤面には出さない */
+  /** 生きているご予約。取り消し・無断キャンセルは含まない */
   M.isActive = function (b) {
     return b.status !== 'canceled' && b.status !== 'noshow';
+  };
+
+  /**
+   * 取り消し済みだが枠を空けないもの。
+   * 直前のキャンセルや無断キャンセルは他の方へ振り替えられないため、
+   * 空き枠に戻さず「キャンセル」として枠に残す。
+   */
+  M.isHeld = function (b) {
+    return !M.isActive(b) && !!b.slotHeld;
+  };
+
+  /** 盤面に出す（＝枠を占有する）かどうか */
+  M.occupies = function (b) {
+    return M.isActive(b) || M.isHeld(b);
   };
 
   M.buildGrid = function (cfg, key, bookings) {
@@ -118,40 +132,115 @@ window.DRB = window.DRB || {};
 
     var grid = {};
     bookings.forEach(function (b) {
-      if (b.date !== key || !M.isActive(b)) return;
+      if (b.date !== key || !M.occupies(b)) return;
       var head = index[b.time];
       if (head === undefined) return;
       var span = Math.max(1, Number(b.span) || 1);
+      var held = M.isHeld(b);
       for (var i = 0; i < span && head + i < slots.length; i++) {
         // 昼休みをまたぐ予約は先頭の帯までで打ち切る
         if (slots[head + i].band !== slots[head].band) break;
-        grid[(head + i) + ':' + b.unit] = { booking: b, head: i === 0, span: span };
+        grid[(head + i) + ':' + b.unit] = { booking: b, head: i === 0, span: span, held: held };
       }
     });
     return { slots: slots, index: index, cells: grid };
+  };
+
+  M.shiftMonth = function (key, n) {
+    var d = M.fromKey(key);
+    return M.toKey(new Date(d.getFullYear(), d.getMonth() + n, 1));
+  };
+
+  M.formatMonth = function (key) {
+    var d = M.fromKey(key);
+    return d.getFullYear() + '年' + (d.getMonth() + 1) + '月';
+  };
+
+  /** 前後の確保時間を枠数に直す */
+  M.bufferSlots = function (cfg) {
+    var b = cfg.buffer || { before: 0, after: 0 };
+    var unit = cfg.slotMinutes || 15;
+    return {
+      before: Math.ceil((Number(b.before) || 0) / unit),
+      after: Math.ceil((Number(b.after) || 0) / unit)
+    };
   };
 
   M.cellAt = function (grid, slotIndex, unitId) {
     return grid.cells[slotIndex + ':' + unitId] || null;
   };
 
-  /** 指定枠に span 分の空きがあるか（自分自身の予約は除外して判定できる） */
-  M.canPlace = function (grid, slotIndex, unitId, span, ignoreId) {
+  /**
+   * 指定枠に span 分の空きがあるか（自分自身の予約は除外して判定できる）。
+   * cfg を渡すと、前後の確保時間ぶんも空いていることを求める。
+   * 確保時間は同じ帯の中だけで見る（昼休みや診療終了は自然に区切りになるため）。
+   */
+  M.canPlace = function (grid, slotIndex, unitId, span, ignoreId, cfg) {
     var slots = grid.slots;
-    if (slotIndex + span > slots.length) return false;
+    if (slotIndex < 0 || slotIndex + span > slots.length) return false;
+
     for (var i = 0; i < span; i++) {
       if (slots[slotIndex + i].band !== slots[slotIndex].band) return false;
       var cell = M.cellAt(grid, slotIndex + i, unitId);
       if (cell && cell.booking.id !== ignoreId) return false;
     }
+
+    if (!cfg) return true;
+    var buf = M.bufferSlots(cfg);
+
+    for (var b = 1; b <= buf.before; b++) {
+      var pi = slotIndex - b;
+      if (pi < 0 || slots[pi].band !== slots[slotIndex].band) break;
+      var pc = M.cellAt(grid, pi, unitId);
+      if (pc && pc.booking.id !== ignoreId) return false;
+    }
+    for (var a = 0; a < buf.after; a++) {
+      var ni = slotIndex + span + a;
+      if (ni >= slots.length || slots[ni].band !== slots[slotIndex].band) break;
+      var nc = M.cellAt(grid, ni, unitId);
+      if (nc && nc.booking.id !== ignoreId) return false;
+    }
     return true;
   };
 
   /** その枠に置ける最大の連続枠数 */
-  M.maxSpanAt = function (grid, slotIndex, unitId, ignoreId) {
+  M.maxSpanAt = function (grid, slotIndex, unitId, ignoreId, cfg) {
     var n = 0;
-    while (M.canPlace(grid, slotIndex, unitId, n + 1, ignoreId) && n < 8) n++;
+    while (M.canPlace(grid, slotIndex, unitId, n + 1, ignoreId, cfg) && n < 8) n++;
     return n;
+  };
+
+  /**
+   * その日のうち、指定のご用件を入れられる開始時刻を返す。
+   * 「用件を選ぶと必要な枠が取れる時間だけ出す」ための関数。
+   * @returns [{time, unit, unitLabel}]
+   */
+  M.openingsFor = function (cfg, key, bookings, purposeKey) {
+    if (M.isClosed(cfg, key)) return [];
+    var grid = M.buildGrid(cfg, key, bookings);
+    var span = purposeKey ? Math.max(1, M.purposeOf(cfg, purposeKey).span || 1) : 1;
+    var out = [];
+
+    grid.slots.forEach(function (slot, i) {
+      cfg.units.forEach(function (u) {
+        if (M.canPlace(grid, i, u.id, span, null, cfg)) {
+          out.push({ time: slot.time, unit: u.id, unitLabel: u.label });
+        }
+      });
+    });
+    return out;
+  };
+
+  /** 開始時刻ごとにまとめる（同じ時刻に複数チェアが空いていても1件として見せる） */
+  M.openingTimes = function (cfg, key, bookings, purposeKey) {
+    var seen = {};
+    var out = [];
+    M.openingsFor(cfg, key, bookings, purposeKey).forEach(function (o) {
+      if (seen[o.time]) return;
+      seen[o.time] = true;
+      out.push(o);
+    });
+    return out;
   };
 
   /* ---------- 集計 ---------- */

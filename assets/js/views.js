@@ -104,11 +104,17 @@ window.DRB = window.DRB || {};
     var cfg = ctx.cfg;
     var purpose = M.purposeOf(cfg, booking.purpose);
     var status = window.DRB.statusOf(booking.status);
+    var held = M.isHeld(booking);
     var wrap = el('div', 'cellwrap');
 
-    var b = el('button', 'slot slot--taken');
+    var b = el('button', 'slot slot--taken' + (held ? ' slot--held' : ''));
     b.type = 'button';
-    b.style.borderLeftColor = purpose.color;
+    b.style.borderLeftColor = held ? '#c98a99' : purpose.color;
+
+    /* 直前の取り消しは他の方へ振り替えられないので、空きに戻さず印を付けて残す */
+    if (held && !ctx.counterMode) {
+      b.appendChild(el('span', 'slot__tag', 'キャンセル'));
+    }
 
     if (ctx.counterMode) {
       b.appendChild(el('span', 'slot__name', 'ご予約あり'));
@@ -133,8 +139,9 @@ window.DRB = window.DRB || {};
     b.addEventListener('click', function () { ctx.onSlot('detail', { booking: booking }); });
     wrap.appendChild(b);
 
-    /* 進み具合のボタン。押すたびに 予約→来院→診療中→お会計→完了 と進む。 */
-    if (!ctx.counterMode) {
+    /* 進み具合のボタン。押すたびに 予約→来院→診療中→お会計→完了 と進む。
+       取り消し済みの枠には出さない。 */
+    if (!ctx.counterMode && !held) {
       var pip = el('button', 'pip', status.short);
       pip.type = 'button';
       pip.style.background = status.color;
@@ -294,8 +301,22 @@ window.DRB = window.DRB || {};
 
   /** @param ctx { cfg, bookings, monthKey, selectedKey, onPickDay } */
   V.renderMonth = function (ctx) {
+    var c = window.DRB.clone({});
+    Object.keys(ctx).forEach(function (k) { c[k] = ctx[k]; });
+    c.host = document.getElementById('calendar');
+    c.captionHost = document.getElementById('monthCaption');
+    V.renderMonthInto(c);
+  };
+
+  /**
+   * 月カレンダーを指定の場所に描く。振替のダイアログからも使うため、
+   * 描画先を渡せるようにしてある。
+   * purposeKey を渡すと、そのご用件の枠を確保できる日だけを押せるようにする。
+   * @param ctx { host, captionHost, cfg, bookings, monthKey, selectedKey, purposeKey, onPickDay }
+   */
+  V.renderMonthInto = function (ctx) {
     var cfg = ctx.cfg;
-    var host = document.getElementById('calendar');
+    var host = ctx.host;
     clear(host);
 
     var base = M.fromKey(ctx.monthKey);
@@ -304,7 +325,7 @@ window.DRB = window.DRB || {};
     var first = new Date(year, month, 1);
     var lastDate = new Date(year, month + 1, 0).getDate();
 
-    document.getElementById('monthCaption').textContent = year + '年' + (month + 1) + '月';
+    if (ctx.captionHost) ctx.captionHost.textContent = year + '年' + (month + 1) + '月';
 
     ['日', '月', '火', '水', '木', '金', '土'].forEach(function (w, i) {
       var cls = 'cal__wd' + (i === 0 ? ' is-sun' : i === 6 ? ' is-sat' : '');
@@ -323,22 +344,40 @@ window.DRB = window.DRB || {};
       btn.type = 'button';
       btn.appendChild(el('span', 'cal__n', String(d)));
 
-      if (M.isClosed(cfg, key)) {
+      if (ctx.minKey && key < ctx.minKey) {
+        // 過ぎた日にはご予約を入れられない
+        btn.className += ' is-past';
+        btn.disabled = true;
+        btn.appendChild(el('span', 'cal__free', '—'));
+      } else if (M.isClosed(cfg, key)) {
         btn.className += ' is-closed';
         btn.disabled = true;
         btn.appendChild(el('span', 'cal__free', '休診'));
       } else {
         var v = M.vacancyOf(cfg, key, ctx.bookings);
-        btn.appendChild(el('span', 'cal__free', '空き ' + v.vacant + '枠'));
+
+        // ご用件が指定されていれば、その枠を続けて取れる時刻の数を出す
+        var openN = ctx.purposeKey
+          ? M.openingTimes(cfg, key, ctx.bookings, ctx.purposeKey).length
+          : v.vacant;
+
+        btn.appendChild(el('span', 'cal__free', openN ? '空き ' + openN + (ctx.purposeKey ? '件' : '枠') : '空きなし'));
         var bar = el('div', 'cal__bar');
         var fill = el('i');
         fill.style.width = v.rate + '%';
         bar.appendChild(fill);
         btn.appendChild(bar);
-        btn.setAttribute('aria-label', M.formatDateLong(key) + ' 空き ' + v.vacant + '枠');
-        (function (k) {
-          btn.addEventListener('click', function () { ctx.onPickDay(k); });
-        })(key);
+        btn.setAttribute('aria-label',
+          M.formatDateLong(key) + '　' + (openN ? '空き ' + openN + '件' : '空きなし'));
+
+        if (!openN) {
+          btn.className += ' is-full';
+          btn.disabled = true;
+        } else {
+          (function (k) {
+            btn.addEventListener('click', function () { ctx.onPickDay(k); });
+          })(key);
+        }
       }
 
       if (key === today) btn.className += ' is-today';
@@ -347,17 +386,42 @@ window.DRB = window.DRB || {};
     }
   };
 
-  /** @param ctx { cfg, bookings, dateKey, onPickSlot } */
+  /** @param ctx { cfg, bookings, dateKey, purposeKey, onPickSlot } */
   V.renderMonthDetail = function (ctx) {
-    var host = document.getElementById('monthDetail');
+    var c = {};
+    Object.keys(ctx).forEach(function (k) { c[k] = ctx[k]; });
+    c.host = document.getElementById('monthDetail');
+    V.renderMonthDetailInto(c);
+  };
+
+  /**
+   * その日の空いている開始時刻を並べる。
+   * purposeKey を渡すと「そのご用件に必要な枠を続けて取れる時刻」だけに絞る。
+   * @param ctx { host, cfg, bookings, dateKey, purposeKey, onPickSlot }
+   */
+  V.renderMonthDetailInto = function (ctx) {
+    var host = ctx.host;
     clear(host);
     if (!ctx.dateKey) return;
 
-    host.appendChild(el('p', 'daylist__h', M.formatDateFull(ctx.dateKey) + ' の空いているお時間'));
+    var purpose = ctx.purposeKey ? M.purposeOf(ctx.cfg, ctx.purposeKey) : null;
+    host.appendChild(el('p', 'daylist__h',
+      M.formatDateFull(ctx.dateKey) + ' の空いているお時間' +
+      (purpose ? '（' + purpose.label + '：' + purpose.span + '枠つづき）' : '')));
 
-    var open = M.openSlotsOf(ctx.cfg, ctx.dateKey, ctx.bookings);
+    var open;
+    if (ctx.purposeKey) {
+      open = M.openingTimes(ctx.cfg, ctx.dateKey, ctx.bookings, ctx.purposeKey)
+        .map(function (o) { return { time: o.time, unit: o.unit }; });
+    } else {
+      open = M.openSlotsOf(ctx.cfg, ctx.dateKey, ctx.bookings)
+        .map(function (s) { return { time: s.time, unit: s.units[0].id }; });
+    }
+
     if (!open.length) {
-      host.appendChild(el('p', 'lead', 'この日は空きがございません。'));
+      host.appendChild(el('p', 'lead', purpose
+        ? 'この日は、このご用件に必要な枠を続けてお取りできる時間がございません。'
+        : 'この日は空きがございません。'));
       return;
     }
 
@@ -365,9 +429,9 @@ window.DRB = window.DRB || {};
     open.forEach(function (s) {
       var btn = el('button', null, s.time);
       btn.type = 'button';
-      btn.setAttribute('aria-label', s.time + ' 空き ' + s.units.length + '台。押すとご予約を入れられます');
+      btn.setAttribute('aria-label', s.time + ' 空き。押すとご予約を入れられます');
       btn.addEventListener('click', function () {
-        ctx.onPickSlot(ctx.dateKey, s.time, s.units[0].id);
+        ctx.onPickSlot(ctx.dateKey, s.time, s.unit);
       });
       wrap.appendChild(btn);
     });

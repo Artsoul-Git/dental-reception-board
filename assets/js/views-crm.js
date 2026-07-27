@@ -84,9 +84,11 @@ window.DRB = window.DRB || {};
     title.appendChild(el('p', 'pthead__sub', sub.join('　')));
     head.appendChild(title);
 
+    var openNext = X.nextOpenBooking(ctx.bookings, p.id);
     var acts = el('div', 'pthead__acts');
     [
       ['予約を入れる', 'onBook', 'btn--primary'],
+      ['直近予約編集', 'onEditNext', ''],
       ['応対を記録', 'onContact', ''],
       ['メールを送る', 'onMail', ''],
       ['内容を直す', 'onEdit', '']
@@ -94,7 +96,15 @@ window.DRB = window.DRB || {};
       var btn = el('button', 'btn ' + a[2], a[0]);
       btn.type = 'button';
       if (a[0] === 'メールを送る' && (!p.email || p.mailOK === false)) btn.disabled = true;
-      btn.addEventListener('click', function () { ctx[a[1]](p); });
+      if (a[0] === '直近予約編集') {
+        if (!openNext) {
+          btn.disabled = true;
+          btn.title = 'これから先の未処理のご予約がありません。';
+        } else {
+          btn.title = M.formatDateFull(openNext.date) + ' ' + openNext.time + ' のご予約を直します。';
+        }
+      }
+      btn.addEventListener('click', function () { ctx[a[1]](p, openNext); });
       acts.appendChild(btn);
     });
     head.appendChild(acts);
@@ -269,9 +279,18 @@ window.DRB = window.DRB || {};
       var body = el('div', 'outbox__body');
       var head = el('p', 'outbox__head');
       head.appendChild(el('b', null, item.name + ' 様'));
-      head.appendChild(el('span', 'outbox__to', item.to));
+      head.appendChild(el('span', 'outbox__to', item.to || '（宛先の登録がありません）'));
       body.appendChild(head);
-      body.appendChild(el('p', 'outbox__meta', item.when));
+
+      /* 経過期間の右に、これまでお出しした回数を媒体別で添える */
+      var meta = el('p', 'outbox__meta', item.when);
+      if (item.counts) {
+        meta.appendChild(el('span', 'outbox__counts', X.dmCountLabel(item.counts)));
+      }
+      if (item.months) {
+        meta.appendChild(el('span', 'outbox__cycle', '案内間隔 ' + item.months + 'か月'));
+      }
+      body.appendChild(meta);
       body.appendChild(el('p', 'outbox__sub', item.subject));
       li.appendChild(body);
 
@@ -303,16 +322,21 @@ window.DRB = window.DRB || {};
 
   /* ================= 送信ログ ================= */
 
-  C.renderLog = function (cfg, messages, query) {
+  C.renderLog = function (cfg, messages, query, patients) {
     var host = $('logList');
     clear(host);
+
+    /* 宛先はお名前と並べて出す。アドレスだけでは誰宛か分からないため。 */
+    var nameById = {};
+    (patients || []).forEach(function (p) { nameById[p.id] = p.name; });
 
     var q = String(query || '').trim().toLowerCase();
     var rows = messages.slice().sort(function (a, b) {
       return String(b.at).localeCompare(String(a.at));
     }).filter(function (m) {
       if (!q) return true;
-      return (m.subject + ' ' + m.to).toLowerCase().indexOf(q) !== -1;
+      var who = nameById[m.patientId] || '';
+      return (m.subject + ' ' + m.to + ' ' + who).toLowerCase().indexOf(q) !== -1;
     });
 
     if (!rows.length) {
@@ -323,7 +347,7 @@ window.DRB = window.DRB || {};
     var table = el('table', 'grid');
     var thead = el('thead');
     var hr = el('tr');
-    ['日時', '種類', '宛先', '件名', '状態'].forEach(function (h) {
+    ['日時', '種類', '手段', '宛先', '件名', '状態'].forEach(function (h) {
       var th = el('th', null, h); th.scope = 'col'; hr.appendChild(th);
     });
     thead.appendChild(hr);
@@ -332,9 +356,17 @@ window.DRB = window.DRB || {};
     var tbody = el('tbody');
     rows.slice(0, 300).forEach(function (m) {
       var tr = el('tr');
-      [stampLabel(m.at), kindLabel(cfg, m.kind), m.to, m.subject].forEach(function (v) {
-        tr.appendChild(el('td', null, v));
-      });
+      tr.appendChild(el('td', null, stampLabel(m.at)));
+      tr.appendChild(el('td', null, kindLabel(cfg, m.kind)));
+      tr.appendChild(el('td', null, window.DRB.channelOf(m.channel).label));
+
+      var to = el('td');
+      var who = nameById[m.patientId] || '';
+      to.appendChild(el('span', 'logto__name', who ? who + ' 様' : '（台帳に登録のない方）'));
+      to.appendChild(el('span', 'logto__addr', m.to || '—'));
+      tr.appendChild(to);
+
+      tr.appendChild(el('td', null, m.subject));
       var td = el('td');
       var pill = el('span', 'pill pill--' + m.state, stateLabel(m.state));
       td.appendChild(pill);
@@ -423,9 +455,11 @@ window.DRB = window.DRB || {};
       head.appendChild(el('b', null, w.name + ' 様'));
       if (w.phone) head.appendChild(el('span', 'outbox__to', w.phone));
       body.appendChild(head);
+      var staff = window.DRB.staffOf(ctx.cfg, w.staffId);
       body.appendChild(el('p', 'outbox__meta',
         M.formatDateLong(w.wantFrom) + ' 〜 ' + M.formatDateLong(w.wantTo) + '　' +
-        preferLabel(w.prefer) + '　' + M.purposeOf(ctx.cfg, w.purpose).label));
+        preferLabel(w.prefer) + '　' + M.purposeOf(ctx.cfg, w.purpose).label +
+        '　担当 ' + (staff ? staff.name : 'どなたでも')));
       if (w.note) body.appendChild(el('p', 'outbox__sub', w.note));
       li.appendChild(body);
 
