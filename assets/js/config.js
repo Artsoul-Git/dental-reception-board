@@ -14,15 +14,13 @@ window.DRB = window.DRB || {};
     { key: 'reception', label: '窓口' },
     { key: 'phone', label: 'お電話' },
     { key: 'web', label: 'ウェブ' },
-    { key: 'mail', label: 'メール' },
-    { key: 'line', label: 'LINE' }
+    { key: 'mail', label: 'メール' }
   ];
 
   /* ご案内をお届けする手段。ハガキは印刷してお出しするので、記録だけを残す。 */
   DRB.DM_CHANNELS = [
     { key: 'postcard', label: 'ハガキ', short: 'ハガキ', sendable: false },
-    { key: 'mail', label: 'メール', short: 'メール', sendable: true },
-    { key: 'line', label: 'LINE', short: 'LINE', sendable: false }
+    { key: 'mail', label: 'メール', short: 'メール', sendable: true }
   ];
 
   /* 患者さんごとの定期健診の間隔 */
@@ -62,7 +60,6 @@ window.DRB = window.DRB || {};
     { key: 'phone', label: 'お電話' },
     { key: 'visit', label: 'ご来院時' },
     { key: 'mail',  label: 'メール' },
-    { key: 'line',  label: 'LINE・SNS' },
     { key: 'other', label: 'その他' }
   ];
 

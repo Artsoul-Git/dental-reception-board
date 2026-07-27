@@ -545,19 +545,20 @@ window.DRB = window.DRB || {};
     $('monthPurposeBar').hidden = false;
 
     var purposeKey = $('monthPurpose').value || '';
+    var staffId = $('monthStaff').value || '';
     $('monthPurposeNote').textContent = state.prefillPatient
-      ? state.prefillPatient.name + ' 様のご予約を入れます。ご用件を選ぶと、必要な枠を続けて取れる日と時刻だけが残ります。'
-      : 'ご用件を選ぶと、必要な枠を続けて取れる開始時刻だけを表示します。';
+      ? state.prefillPatient.name + ' 様のご予約を入れます。ご用件と担当を選ぶと、その組み合わせで取れる日と時刻だけが残ります。'
+      : 'ご用件と担当を選ぶと、その組み合わせで取れる開始時刻だけを表示します。担当を選ぶと、その先生がすでに入っている時間は外れます。';
 
     V.renderMonth({
       cfg: cfg, bookings: state.bookings, monthKey: state.monthKey,
-      selectedKey: state.selectedMonthDay, purposeKey: purposeKey,
+      selectedKey: state.selectedMonthDay, purposeKey: purposeKey, staffId: staffId,
       minKey: M.todayKey(),
       onPickDay: function (key) { state.selectedMonthDay = key; renderMonth(); }
     });
     V.renderMonthDetail({
       cfg: cfg, bookings: state.bookings, dateKey: state.selectedMonthDay,
-      purposeKey: purposeKey,
+      purposeKey: purposeKey, staffId: staffId,
       onPickSlot: function (key, time, unit) {
         var pre = null;
         if (state.prefillPatient) {
@@ -565,10 +566,10 @@ window.DRB = window.DRB || {};
           pre = {
             patientId: p.id, name: p.name, cardNo: p.cardNo,
             phone: p.phone, email: p.email, purpose: purposeKey || undefined,
-            staffId: $('monthStaff').value
+            staffId: staffId
           };
-        } else if (purposeKey) {
-          pre = { purpose: purposeKey, staffId: $('monthStaff').value };
+        } else if (purposeKey || staffId) {
+          pre = { purpose: purposeKey || undefined, staffId: staffId };
         }
         goDate(key); showTab('day'); openCreate(key, time, unit, pre);
         state.prefillPatient = null;
@@ -711,6 +712,9 @@ window.DRB = window.DRB || {};
     $('btnSendRecall').addEventListener('click', function () {
       deliver(C.checkedItems('recallList', state.outbox.recall));
     });
+    $('btnDraftRecall').addEventListener('click', function () {
+      stash(C.checkedItems('recallList', state.outbox.recall));
+    });
     $('btnCheckAllRc').addEventListener('click', function () { C.toggleAll('recallList'); });
     $('btnRecallCSV').addEventListener('click', exportRecallCSV);
 
@@ -769,9 +773,7 @@ window.DRB = window.DRB || {};
     state.outbox.recall.forEach(function (r) {
       var p = X.findPatient(state.patients, r.patientId);
       r.channel = ch;
-      r.to = ch === 'mail' ? (p && p.email) || ''
-           : ch === 'line' ? ((p && p.lineId) ? 'LINE（登録あり）' : '')
-           : 'ハガキ（宛名を印刷します）';
+      r.to = ch === 'mail' ? (p && p.email) || '' : 'ハガキ（宛名を印刷します）';
     });
 
     state.outbox.draft = state.messages.filter(function (m) { return m.state === 'draft'; })
@@ -808,6 +810,23 @@ window.DRB = window.DRB || {};
       ? state.outbox.recall.length + ' 名が対象です（' +
         (Number(elapsedSel.value) || X.RECALL_MIN_MONTHS) + 'か月以上お見えでない方）。'
       : '対象の方はいらっしゃいません。';
+
+    /* ハガキはこの画面から送るものではないので、送信と下書きは使えないようにする。
+       代わりに、宛名の印刷に使うCSVの書き出しへ誘導する。 */
+    var sendable = DRB.channelOf(ch).sendable;
+    var none = !state.outbox.recall.length;
+    $('btnSendRecall').disabled = !sendable || none;
+    $('btnDraftRecall').disabled = !sendable || none;
+    $('btnRecallCSV').disabled = none;
+    $('btnRecallCSV').className = 'btn' + (sendable ? '' : ' btn--primary');
+
+    var note = $('recallChNote');
+    note.hidden = sendable;
+    if (!sendable) {
+      note.textContent = 'ハガキでお出しする設定です。この画面からは送信できませんので、'
+        + '「対象をCSVで書き出す」で宛名の一覧をお取りください。'
+        + 'メールでお送りになる場合は、上の「お届けの手段」をメールに変えてください。';
+    }
 
     var dn = state.outbox.draft.length;
     $('draftBadge').textContent = String(dn);
@@ -913,7 +932,7 @@ window.DRB = window.DRB || {};
       };
     });
 
-    /* ハガキ・LINEはこの画面からは送れない。お出しした記録として残す。 */
+    /* ハガキはこの画面からは送れない。お出しした記録として残す。 */
     var mailable = stamped.filter(function (m) { return DRB.channelOf(m.channel).sendable; });
     var offline = stamped.filter(function (m) { return !DRB.channelOf(m.channel).sendable; });
 
@@ -1597,15 +1616,20 @@ window.DRB = window.DRB || {};
     toast('患者台帳をCSVで書き出しました。');
   }
 
+  /** ハガキの宛名づくりにそのまま使えるよう、診察券番号・ご住所まで入れる */
   function exportRecallCSV() {
-    var head = ['お名前', 'メール', '前回のご来院', 'ご案内の時期', '間隔（か月）'];
+    var head = ['診察券番号', 'お名前', 'ふりがな', 'ご住所', 'お電話', 'メール',
+      '前回のご来院', '経過（か月）', 'ご案内の時期', '案内間隔（か月）',
+      'ハガキ送付回数', 'メール送付回数'];
     var lines = [csvLine(head)];
     state.outbox.recall.forEach(function (r) {
-      var p = X.findPatient(state.patients, r.patientId);
-      lines.push(csvLine([r.name, r.to, p ? p.lastVisit : '', r.due, r.months]));
+      var p = X.findPatient(state.patients, r.patientId) || {};
+      var c = r.counts || X.emptyDmCount();
+      lines.push(csvLine([p.cardNo, r.name, p.kana, p.address, p.phone, p.email,
+        p.lastVisit, r.elapsed, r.due, r.months, c.postcard || 0, c.mail || 0]));
     });
     download('定期健診のご案内_' + M.todayKey() + '.csv', lines.join('\r\n'));
-    toast('ご案内の対象をCSVで書き出しました。');
+    toast(state.outbox.recall.length + ' 名ぶんをCSVで書き出しました。');
   }
 
   function exportLogCSV() {

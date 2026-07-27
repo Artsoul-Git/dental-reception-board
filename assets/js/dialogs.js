@@ -264,7 +264,7 @@ window.DRB = window.DRB || {};
   /* ================= 連絡先の表示 ================= */
 
   /**
-   * お電話・メール・LINEの登録状況を並べる。
+   * お電話・メールの登録状況を並べる。
    * 無断キャンセルの応対では「どこへ連絡できるか」がその場で要るため、必ず出す。
    */
   D.fillContactLine = function (hostId, booking, patient) {
@@ -273,8 +273,7 @@ window.DRB = window.DRB || {};
     var p = patient || {};
     [
       ['お電話', booking.phone || p.phone],
-      ['メール', booking.email || p.email],
-      ['LINE', p.lineId ? '登録あり' : '']
+      ['メール', booking.email || p.email]
     ].forEach(function (r) {
       host.appendChild(el('dt', null, r[0]));
       var dd = el('dd', r[1] ? null : 'is-none', r[1] || '未登録');
@@ -360,13 +359,13 @@ window.DRB = window.DRB || {};
         host: $('rbCal'),
         cfg: cfg, bookings: opts.bookings, monthKey: monthKey,
         selectedKey: selected, minKey: floorKey,
-        purposeKey: $('rbPurpose').value,
+        purposeKey: $('rbPurpose').value, staffId: $('rbStaff').value,
         onPickDay: function (key) { selected = key; draw(); }
       });
       V.renderMonthDetailInto({
         host: $('rbDetail'),
         cfg: cfg, bookings: opts.bookings, dateKey: selected,
-        purposeKey: $('rbPurpose').value,
+        purposeKey: $('rbPurpose').value, staffId: $('rbStaff').value,
         onPickSlot: function (key, time, unit) {
           opts.onPick(key, time, unit, $('rbPurpose').value, $('rbStaff').value);
         }
@@ -385,7 +384,9 @@ window.DRB = window.DRB || {};
       on($('rbClose'), 'click', function () { done('closed'); });
       on($('rbPrev'), 'click', function () { monthKey = M.shiftMonth(monthKey, -1); selected = null; draw(); });
       on($('rbNext'), 'click', function () { monthKey = M.shiftMonth(monthKey, 1); selected = null; draw(); });
+      // ご用件・担当医を変えたら、空き状況をその場で引き直す
       on($('rbPurpose'), 'change', draw);
+      on($('rbStaff'), 'change', draw);
     }).then(function (v) {
       D.rebookRedraw = null;
       D.rebookShowResult = null;
@@ -407,7 +408,6 @@ window.DRB = window.DRB || {};
     $('ptBirth').value = p.birth || '';
     $('ptPhone').value = p.phone || '';
     $('ptEmail').value = p.email || '';
-    $('ptLine').value = p.lineId || '';
     $('ptAddress').value = p.address || '';
     $('ptAllergy').value = p.allergy || '';
     $('ptMedical').value = p.medical || '';
@@ -467,7 +467,6 @@ window.DRB = window.DRB || {};
         out.birth = $('ptBirth').value;
         out.phone = $('ptPhone').value.trim();
         out.email = $('ptEmail').value.trim();
-        out.lineId = $('ptLine').value.trim();
         out.address = $('ptAddress').value.trim();
         out.recallMonths = Number($('ptRecall').value);
         out.tags = currentTags();

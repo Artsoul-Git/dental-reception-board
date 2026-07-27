@@ -79,6 +79,10 @@ window.DRB = window.DRB || {};
       '.an-note{font-size:12px;color:var(--ink-mute);margin-top:8px;}',
       '.an-bars .bars__i{grid-template-columns:8em 1fr 3.6em;}',
       '.an-scroll{overflow-x:auto;}',
+      '.an-panel > .h3:first-child{margin-top:2px;}',
+      '.an-figs{display:flex;gap:20px;flex-wrap:wrap;align-items:baseline;font-size:13.5px;}',
+      '.an-figs b{font-size:19px;}',
+      '.an-sect{margin-top:6px;}',
       '.an-issues{display:grid;gap:16px;}',
       '.an-issues__h{font-size:15px;font-weight:700;color:var(--accent-deep);margin-bottom:6px;}',
       '.an-issues ol{margin:0;padding-left:1.4em;display:grid;gap:5px;font-size:13.5px;}',
@@ -131,11 +135,6 @@ window.DRB = window.DRB || {};
     return el('span', cls, caption + ' ' + text);
   }
 
-  function emptyIn(host, text) {
-    clear(host);
-    host.appendChild(el('p', 'empty', text));
-  }
-
   function setCaption(id, text) {
     var node = $(id);
     if (node) node.textContent = text;
@@ -145,7 +144,7 @@ window.DRB = window.DRB || {};
 
   /**
    * 2万件規模でも耐えるよう、走査は一度だけにして索引を使い回す。
-   * byDate は日別の稼働率計算に、visits は再来院・DM後来院の判定に使う。
+   * byDate は日別の稼働率計算に、visits は再来院・ご案内後来院の判定に使う。
    */
   function buildIndex(ctx) {
     var today = M.todayKey();
@@ -153,10 +152,12 @@ window.DRB = window.DRB || {};
       today: today,
       byDate: {},
       visits: {},          // 患者ID → ご来院日（昇順・重複あり）
+      visitRec: {},        // 患者ID → ご来院の記録（昇順・ご用件つき）
       hasFuture: {},       // 患者ID → この先のご予約があるか
       patients: {},
       period: [],          // 集計期間内の予約
       statCache: {},
+      rv3: {},             // 患者ID → 3か月以内の再来院判定（使い回し）
       rangeOk: false,
       from: '',
       to: ''
@@ -174,14 +175,83 @@ window.DRB = window.DRB || {};
       if (!b || !isKey(b.date)) return;
       (ix.byDate[b.date] || (ix.byDate[b.date] = [])).push(b);
       if (b.patientId) {
-        if (isVisit(b)) (ix.visits[b.patientId] || (ix.visits[b.patientId] = [])).push(b.date);
+        if (isVisit(b)) {
+          (ix.visitRec[b.patientId] || (ix.visitRec[b.patientId] = [])).push({
+            date: b.date, time: b.time || '', purpose: b.purpose || ''
+          });
+        }
         if (M.isActive(b) && b.date >= today) ix.hasFuture[b.patientId] = true;
       }
       if (ix.rangeOk && b.date >= ix.from && b.date <= ix.to) ix.period.push(b);
     });
 
-    Object.keys(ix.visits).forEach(function (pid) { ix.visits[pid].sort(); });
+    // 並べ替えは患者ごとに1回だけ。日付だけの配列は二分探索用に切り出しておく。
+    Object.keys(ix.visitRec).forEach(function (pid) {
+      var recs = ix.visitRec[pid];
+      recs.sort(function (a, b) {
+        return (a.date + ' ' + a.time).localeCompare(b.date + ' ' + b.time);
+      });
+      var dates = [];
+      for (var i = 0; i < recs.length; i++) dates.push(recs[i].date);
+      ix.visits[pid] = dates;
+    });
     return ix;
+  }
+
+  /**
+   * その患者さんが「3か月以内に次のご来院があったか」を返す。
+   * 起点は、3か月が経過している中でいちばん新しいご来院。
+   * まだ3か月経っていない方は判定できないので null（分母から外す）。
+   */
+  function revisit3Of(ix, pid) {
+    if (ix.rv3[pid] !== undefined) return ix.rv3[pid];
+
+    var recs = ix.visitRec[pid];
+    var out = null;
+    if (recs && recs.length) {
+      var si = -1;
+      for (var i = recs.length - 1; i >= 0; i--) {
+        if (addMonths(recs[i].date, 3) <= ix.today) { si = i; break; }
+      }
+      if (si >= 0) {
+        var due = addMonths(recs[si].date, 3);
+        var came = false;
+        for (var j = si + 1; j < recs.length; j++) {
+          if (recs[j].date > recs[si].date) { came = recs[j].date <= due; break; }
+        }
+        out = { start: recs[si].date, purpose: recs[si].purpose, came: came };
+      }
+    }
+    ix.rv3[pid] = out;
+    return out;
+  }
+
+  /** 集計期間内のご来院回数 */
+  function visitCountInRange(ix, pid) {
+    if (!ix.rangeOk) return 0;
+    var v = ix.visits[pid];
+    if (!v || !v.length) return 0;
+    return bisect(v, ix.to, true) - bisect(v, ix.from, false);
+  }
+
+  /** 最終来院からの経過月数（切り捨て） */
+  function monthsSince(key, today) {
+    var a = M.fromKey(key);
+    var b = M.fromKey(today);
+    var n = (b.getFullYear() - a.getFullYear()) * 12 + (b.getMonth() - a.getMonth());
+    if (b.getDate() < a.getDate()) n--;
+    return n < 0 ? 0 : n;
+  }
+
+  function oneDecimal(sum, count) {
+    return count > 0 ? (Math.round((sum / count) * 10) / 10).toFixed(1) : '0.0';
+  }
+
+  function medianOf(nums) {
+    if (!nums.length) return 0;
+    var s = nums.slice().sort(function (a, b) { return a - b; });
+    var mid = s.length >> 1;
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
   }
 
   /** その日の集計。休診日は null を返す。日別に索引した予約だけ渡すので走査量が増えない。 */
@@ -784,17 +854,33 @@ window.DRB = window.DRB || {};
     host.appendChild(panel);
   }
 
-  /* ================= DM後のご来院率（媒体別） ================= */
+  /* ================= ご案内後のご来院率（媒体別） ================= */
 
   var DM_WINDOW_DAYS = 30;
-  var CHANNEL_LABEL = { mail: 'メール', line: 'LINE', postcard: 'ハガキ' };
+
+  /** 媒体は設定側の一覧をそのまま使う。増減しても分析側を直さなくて済む。 */
+  function dmChannels() {
+    var src = DRB.DM_CHANNELS || [];
+    var list = [];
+    src.forEach(function (c) {
+      if (c && c.key) list.push({ key: c.key, label: c.label || c.key });
+    });
+    if (!list.length) list = [{ key: 'mail', label: 'メール' }];
+    return list;
+  }
 
   function renderDmVisit(ctx, ix) {
     var host = $('repDmVisit');
     if (!host) return;
     clear(host);
 
-    var stats = { mail: { sent: 0, hit: 0 }, line: { sent: 0, hit: 0 }, postcard: { sent: 0, hit: 0 } };
+    var channels = dmChannels();
+    var stats = {};
+    var fallback = channels[0].key;
+    channels.forEach(function (c) {
+      stats[c.key] = { sent: 0, hit: 0 };
+      if (c.key === 'mail') fallback = 'mail';  // 媒体が空・未知のものはメール扱い
+    });
     var counted = 0;
 
     (ctx.messages || []).forEach(function (m) {
@@ -804,13 +890,12 @@ window.DRB = window.DRB || {};
       var day = String(m.at || '').slice(0, 10);
       if (!isKey(day)) return;
       if (!ix.rangeOk || day < ix.from || day > ix.to) return;
-      var box = stats[m.channel];
-      if (!box) return;
 
+      var box = stats[m.channel] || stats[fallback];
       box.sent++;
       counted++;
 
-      // その患者さんに、送信日から30日以内のご来院があったか
+      // その患者さんに、お送りした日から30日以内のご来院があったか
       var visits = ix.visits[m.patientId];
       if (!visits || !visits.length) return;
       var i = bisect(visits, day, false);
@@ -822,10 +907,10 @@ window.DRB = window.DRB || {};
       return;
     }
 
-    var rows = ['mail', 'line', 'postcard'].map(function (ch) {
-      var s = stats[ch];
-      if (!s.sent) return [CHANNEL_LABEL[ch], '送信なし', '—', '—'];
-      return [CHANNEL_LABEL[ch], s.sent + '通', s.hit + '名', pct(s.hit, s.sent) + '%'];
+    var rows = channels.map(function (c) {
+      var s = stats[c.key];
+      if (!s.sent) return [c.label, '送信なし', '—', '—'];
+      return [c.label, s.sent + '通', s.hit + '名', pct(s.hit, s.sent) + '%'];
     });
 
     host.appendChild(table(['媒体', '送信数', 'ご来院', '割合'], rows));
@@ -942,21 +1027,277 @@ window.DRB = window.DRB || {};
       return;
     }
 
-    var counts = {};
-    var noTag = 0;
+    var groups = {};   // タグ名 → 集計箱
+    var noTag = { people: 0, denom: 0, hit: 0, visits: 0 };
+
+    function put(box, p) {
+      box.people++;
+      box.visits += visitCountInRange(ix, p.id);
+      var r = revisit3Of(ix, p.id);
+      if (r) {
+        box.denom++;
+        if (r.came) box.hit++;
+      }
+    }
+
     patients.forEach(function (p) {
       var tags = p.tags || [];
-      if (!tags.length) { noTag++; return; }
-      tags.forEach(function (t) { counts[t] = (counts[t] || 0) + 1; });
+      if (!tags.length) { put(noTag, p); return; }
+      tags.forEach(function (t) {
+        put(groups[t] || (groups[t] = { people: 0, denom: 0, hit: 0, visits: 0 }), p);
+      });
     });
 
-    var rows = Object.keys(counts).map(function (t) {
-      return { label: t, n: counts[t], text: counts[t] + '名', color: 'var(--accent)' };
-    }).sort(function (a, b) { return b.n - a.n; });
+    var rows = Object.keys(groups).map(function (t) {
+      var g = groups[t];
+      g.label = t;
+      return g;
+    }).sort(function (a, b) { return b.people - a.people; });
 
-    if (noTag > 0) rows.push({ label: 'タグなし', n: noTag, text: noTag + '名', color: GREY });
+    if (noTag.people > 0) {
+      noTag.label = 'タグなし';
+      rows.push(noTag);
+    }
 
-    host.appendChild(barsList(rows));
+    host.appendChild(table(['タグ', '人数', '再来院率（3か月以内）', '平均ご来院回数', '備考'],
+      rows.map(function (r) {
+        return [
+          r.label,
+          r.people + '名',
+          r.denom ? pct(r.hit, r.denom) + '%（' + r.denom + '名で判定）' : 'まだ判定できません',
+          oneDecimal(r.visits, r.people) + '回',
+          (r.denom > 0 && r.denom < 5) ? '件数が少なく参考値です' : ''
+        ];
+      })));
+
+    host.appendChild(el('p', 'an-note',
+      '再来院率は、3か月が経過したいちばん新しいご来院を起点に判定しています。' +
+      '平均ご来院回数は集計期間内の実績です。'));
+  }
+
+  /* ================= 休眠患者 ================= */
+
+  var DORMANT_MONTHS = 6;
+  var DORMANT_BUCKETS = [
+    { label: '6〜8か月', min: 6, max: 8 },
+    { label: '9〜11か月', min: 9, max: 11 },
+    { label: '12〜17か月', min: 12, max: 17 },
+    { label: '18〜23か月', min: 18, max: 23 },
+    { label: '24か月以上', min: 24, max: Infinity }
+  ];
+
+  function purposeInfo(cfg, key) {
+    var p = M.purposeOf(cfg, key);
+    return { label: p.label, color: p.color || GREY };
+  }
+
+  /** 分母5名未満のときだけ「参考値」を添える */
+  function refNote(denom) {
+    return (denom > 0 && denom < 5) ? '件数が少なく参考値です' : '';
+  }
+
+  function renderDormant(ctx, ix) {
+    var host = $('repDormant');
+    if (!host) return;
+    clear(host);
+
+    var cfg = ctx.cfg;
+    var seen = [];   // ご来院の記録がある方だけを対象にする
+    (ctx.patients || []).forEach(function (p) {
+      var recs = ix.visitRec[p.id];
+      if (recs && recs.length) seen.push({ p: p, recs: recs });
+    });
+
+    if (!seen.length) {
+      host.appendChild(el('p', 'empty', 'ご来院の記録がまだありません。'));
+      return;
+    }
+
+    /* --- 休眠かどうかの仕分け --- */
+    var dormant = [];
+    seen.forEach(function (s) {
+      var last = s.recs[s.recs.length - 1];
+      var months = monthsSince(last.date, ix.today);
+      if (months < DORMANT_MONTHS) return;
+      if (ix.hasFuture[s.p.id]) return;      // この先のご予約が入っている方は除く
+      dormant.push({ p: s.p, recs: s.recs, months: months, lastPurpose: last.purpose });
+    });
+    var isDormant = {};
+    dormant.forEach(function (d) { isDormant[d.p.id] = true; });
+
+    var panel = el('div', 'an-panel');
+
+    /* --- (a) 何か月目からお見えになっていないか --- */
+    panel.appendChild(el('h3', 'h3', '何か月目からお見えになっていないか'));
+    if (!dormant.length) {
+      panel.appendChild(el('p', 'lead', '休眠されている患者さんはいらっしゃいません。'));
+    } else {
+      var buckets = DORMANT_BUCKETS.map(function (b) {
+        var n = 0;
+        dormant.forEach(function (d) { if (d.months >= b.min && d.months <= b.max) n++; });
+        return {
+          label: b.label, n: n, color: 'var(--hold)',
+          text: n + '名（' + pct(n, dormant.length) + '%）'
+        };
+      });
+      panel.appendChild(barsList(buckets));
+      panel.appendChild(el('p', 'an-note',
+        '休眠されている患者さんは合わせて ' + dormant.length + '名（ご来院実績のある ' +
+        seen.length + '名のうち ' + pct(dormant.length, seen.length) +
+        '%）です。最終のご来院から ' + DORMANT_MONTHS +
+        'か月以上が経ち、この先のご予約が入っていない方を数えています。'));
+    }
+
+    /* --- (b) 離脱までのご来院回数 --- */
+    panel.appendChild(el('h3', 'h3', '離脱までのご来院回数'));
+    if (!dormant.length) {
+      panel.appendChild(el('p', 'lead', '対象となる患者さんがいらっしゃいません。'));
+    } else {
+      var nums = dormant.map(function (d) { return d.recs.length; });
+      var sum = nums.reduce(function (a, n) { return a + n; }, 0);
+      var figs = el('div', 'an-figs');
+      [
+        ['平均', oneDecimal(sum, nums.length) + ' 回'],
+        ['中央値', (Math.round(medianOf(nums) * 10) / 10).toFixed(1) + ' 回'],
+        ['対象', dormant.length + ' 名']
+      ].forEach(function (f) {
+        var span = el('span', null, f[0] + ' ');
+        span.appendChild(el('b', null, f[1]));
+        figs.appendChild(span);
+      });
+      panel.appendChild(figs);
+      panel.appendChild(el('p', 'an-note',
+        '平均は少数の常連の方に引っ張られますので、中央値とあわせてご覧ください。'));
+    }
+
+    /* --- (c) 最後のご来院のご用件 上位3 --- */
+    panel.appendChild(el('h3', 'h3', '最後のご来院のご用件（多い順に3つ）'));
+    if (!dormant.length) {
+      panel.appendChild(el('p', 'lead', '対象となる患者さんがいらっしゃいません。'));
+    } else {
+      var lastCount = {};
+      dormant.forEach(function (d) {
+        lastCount[d.lastPurpose] = (lastCount[d.lastPurpose] || 0) + 1;
+      });
+      var top = Object.keys(lastCount).map(function (k) {
+        var info = purposeInfo(cfg, k);
+        return {
+          label: info.label, color: info.color, n: lastCount[k],
+          text: lastCount[k] + '名（' + pct(lastCount[k], dormant.length) + '%）'
+        };
+      }).sort(function (a, b) { return b.n - a.n; }).slice(0, 3);
+      panel.appendChild(barsList(top));
+    }
+
+    /* --- (d) 初診用件・最終用件ごとの再来院率（対象は全患者） --- */
+    var firstBox = {};
+    var lastBox = {};
+    seen.forEach(function (s) {
+      var first = s.recs[0];
+
+      // 初診からの定着は、3か月が経過した方だけで判定する
+      if (addMonths(first.date, 3) <= ix.today) {
+        var fb = firstBox[first.purpose] ||
+          (firstBox[first.purpose] = { denom: 0, hit: 0, dormant: 0 });
+        fb.denom++;
+        if (s.recs.length > 1) fb.hit++;
+        if (isDormant[s.p.id]) fb.dormant++;
+      }
+
+      var r = revisit3Of(ix, s.p.id);
+      if (r) {
+        var lb = lastBox[r.purpose] || (lastBox[r.purpose] = { denom: 0, hit: 0, dormant: 0 });
+        lb.denom++;
+        if (r.came) lb.hit++;
+        if (isDormant[s.p.id]) lb.dormant++;
+      }
+    });
+
+    function boxRows(map) {
+      return Object.keys(map).map(function (k) {
+        var b = map[k];
+        b.label = purposeInfo(cfg, k).label;
+        b.rate = pct(b.hit, b.denom);
+        return b;
+      }).sort(function (a, b) { return b.denom - a.denom; });
+    }
+
+    var firstRows = boxRows(firstBox);
+    var lastRows = boxRows(lastBox);
+
+    panel.appendChild(el('h3', 'h3', 'ご用件ごとの再来院率'));
+    var two = el('div', 'two');
+
+    var c1 = el('div');
+    c1.appendChild(el('p', 'an-note', '初診のご用件ごと（2回目以降のご来院があった割合）'));
+    if (!firstRows.length) {
+      c1.appendChild(el('p', 'lead', 'まだ判定できる患者さんがいらっしゃいません。'));
+    } else {
+      c1.appendChild(table(['初診のご用件', '人数', '定着', '休眠', '備考'],
+        firstRows.map(function (r) {
+          return [r.label, r.denom + '名', r.rate + '%',
+            pct(r.dormant, r.denom) + '%', refNote(r.denom)];
+        })));
+    }
+    two.appendChild(c1);
+
+    var c2 = el('div');
+    c2.appendChild(el('p', 'an-note', '最後のご用件ごと（3か月以内に再びご来院があった割合）'));
+    if (!lastRows.length) {
+      c2.appendChild(el('p', 'lead', 'まだ判定できる患者さんがいらっしゃいません。'));
+    } else {
+      c2.appendChild(table(['最後のご用件', '人数', '再来院', '休眠', '備考'],
+        lastRows.map(function (r) {
+          return [r.label, r.denom + '名', r.rate + '%',
+            pct(r.dormant, r.denom) + '%', refNote(r.denom)];
+        })));
+    }
+    two.appendChild(c2);
+    panel.appendChild(two);
+
+    /* --- (e) 所見 --- */
+    var lines = [];
+    var GAP = 15;   // 全体との差がこれ以上開いたら所見に出す
+
+    function baseRate(rows) {
+      var d = 0, h = 0;
+      rows.forEach(function (r) { d += r.denom; h += r.hit; });
+      return { rate: pct(h, d), denom: d };
+    }
+
+    var lastBase = baseRate(lastRows);
+    lastRows.forEach(function (r) {
+      if (r.denom < 5) return;
+      if (r.rate <= lastBase.rate - GAP) {
+        lines.push('最後のご用件が「' + r.label + '」の方は再来院率が ' + r.rate +
+          '%（全体 ' + lastBase.rate + '%・対象 ' + r.denom +
+          '名）と低めで、その処置が済むとお見えになりにくい傾向がうかがえます。');
+      }
+    });
+
+    var firstBase = baseRate(firstRows);
+    firstRows.forEach(function (r) {
+      if (r.denom < 5) return;
+      if (r.rate <= firstBase.rate - GAP) {
+        lines.push('初診のご用件が「' + r.label + '」の方は2回目以降のご来院が ' + r.rate +
+          '%（全体 ' + firstBase.rate + '%・対象 ' + r.denom +
+          '名）にとどまり、初回のあとのご案内を見直す余地があります。');
+      }
+    });
+
+    if (dormant.length && pct(dormant.length, seen.length) >= 20) {
+      lines.push('ご来院実績のある ' + seen.length + '名のうち ' + dormant.length + '名（' +
+        pct(dormant.length, seen.length) +
+        '%）が休眠されています。お声がけの対象として整理されてはいかがでしょうか。');
+    }
+
+    if (!lines.length) lines.push('用件による大きな差は見られません。');
+
+    var advice = el('ul', 'an-advice');
+    lines.slice(0, 3).forEach(function (t) { advice.appendChild(el('li', null, t)); });
+    panel.appendChild(advice);
+
+    host.appendChild(panel);
   }
 
   /* ================= 当院の課題 ================= */
@@ -1142,6 +1483,7 @@ window.DRB = window.DRB || {};
       'この期間のご来院がまだ記録されていません。');
 
     renderTags(safe, ix);
+    renderDormant(safe, ix);
     renderIssues(safe, ix);
   };
 })(window.DRB);

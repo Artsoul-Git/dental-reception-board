@@ -183,7 +183,7 @@ window.DRB = window.DRB || {};
       if (m.kind !== 'recall' && m.kind !== 'dm') return;
       if (m.state !== 'sent' && m.state !== 'simulated') return;
       if (!m.patientId) return;
-      var c = idx[m.patientId] || (idx[m.patientId] = { mail: 0, line: 0, postcard: 0, total: 0 });
+      var c = idx[m.patientId] || (idx[m.patientId] = { mail: 0, postcard: 0, total: 0 });
       var ch = m.channel || 'mail';
       if (c[ch] === undefined) c[ch] = 0;
       c[ch]++;
@@ -192,7 +192,7 @@ window.DRB = window.DRB || {};
     return idx;
   };
 
-  X.emptyDmCount = function () { return { mail: 0, line: 0, postcard: 0, total: 0 }; };
+  X.emptyDmCount = function () { return { mail: 0, postcard: 0, total: 0 }; };
 
   /** 「ハガキ：2回、メール：1回」のような表示用の文字列にする */
   X.dmCountLabel = function (count) {
@@ -336,7 +336,6 @@ window.DRB = window.DRB || {};
       months: months,
       elapsed: elapsed,
       counts: counts || X.emptyDmCount(),
-      hasLine: !!patient.lineId,
       when: '前回 ' + M.formatDateLong(last) + '（' + elapsed + 'か月経過）'
     };
   }

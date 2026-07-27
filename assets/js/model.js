@@ -211,19 +211,76 @@ window.DRB = window.DRB || {};
   };
 
   /**
-   * その日のうち、指定のご用件を入れられる開始時刻を返す。
-   * 「用件を選ぶと必要な枠が取れる時間だけ出す」ための関数。
+   * 「この枠にこのスタッフがすでに入っているか」の対応表。
+   * 先生は同じ時間にひとつのチェアにしか入れないので、
+   * チェアの空きとは別に、担当ごとの埋まり具合を見る必要がある。
+   */
+  M.staffBusyMap = function (cfg, key, bookings) {
+    var slots = M.slotsOf(cfg, key);
+    var index = {};
+    slots.forEach(function (s, i) { index[s.time] = i; });
+
+    var busy = {};
+    bookings.forEach(function (b) {
+      if (b.date !== key || !M.isActive(b) || !b.staffId) return;
+      var head = index[b.time];
+      if (head === undefined) return;
+      var span = Math.max(1, Number(b.span) || 1);
+      for (var i = 0; i < span && head + i < slots.length; i++) {
+        if (slots[head + i].band !== slots[head].band) break;
+        busy[(head + i) + ':' + b.staffId] = b.id;
+      }
+    });
+    return { busy: busy, slots: slots, index: index };
+  };
+
+  /** そのスタッフが span 分あいているか。前後の確保時間も同じように見る。 */
+  M.staffFree = function (map, slotIndex, staffId, span, ignoreId, cfg) {
+    if (!staffId) return true;
+    var slots = map.slots;
+    if (slotIndex < 0 || slotIndex + span > slots.length) return false;
+
+    function taken(i) {
+      var hit = map.busy[i + ':' + staffId];
+      return hit && hit !== ignoreId;
+    }
+
+    for (var i = 0; i < span; i++) {
+      if (slots[slotIndex + i].band !== slots[slotIndex].band) return false;
+      if (taken(slotIndex + i)) return false;
+    }
+
+    if (!cfg) return true;
+    var buf = M.bufferSlots(cfg);
+    for (var b = 1; b <= buf.before; b++) {
+      var pi = slotIndex - b;
+      if (pi < 0 || slots[pi].band !== slots[slotIndex].band) break;
+      if (taken(pi)) return false;
+    }
+    for (var a = 0; a < buf.after; a++) {
+      var ni = slotIndex + span + a;
+      if (ni >= slots.length || slots[ni].band !== slots[slotIndex].band) break;
+      if (taken(ni)) return false;
+    }
+    return true;
+  };
+
+  /**
+   * その日のうち、指定のご用件・担当で入れられる開始時刻を返す。
+   * 「用件と担当を選ぶと、その組み合わせで取れる時間だけ出す」ための関数。
    * @returns [{time, unit, unitLabel}]
    */
-  M.openingsFor = function (cfg, key, bookings, purposeKey) {
+  M.openingsFor = function (cfg, key, bookings, purposeKey, staffId, ignoreId) {
     if (M.isClosed(cfg, key)) return [];
     var grid = M.buildGrid(cfg, key, bookings);
     var span = purposeKey ? Math.max(1, M.purposeOf(cfg, purposeKey).span || 1) : 1;
+    var smap = staffId ? M.staffBusyMap(cfg, key, bookings) : null;
     var out = [];
 
     grid.slots.forEach(function (slot, i) {
+      if (smap && !M.staffFree(smap, i, staffId, span, ignoreId, cfg)) return;
       cfg.units.forEach(function (u) {
-        if (M.canPlace(grid, i, u.id, span, null, cfg)) {
+        if (M.canPlace(grid, i, u.id, span, ignoreId, cfg)) {
           out.push({ time: slot.time, unit: u.id, unitLabel: u.label });
         }
       });
@@ -232,10 +289,10 @@ window.DRB = window.DRB || {};
   };
 
   /** 開始時刻ごとにまとめる（同じ時刻に複数チェアが空いていても1件として見せる） */
-  M.openingTimes = function (cfg, key, bookings, purposeKey) {
+  M.openingTimes = function (cfg, key, bookings, purposeKey, staffId, ignoreId) {
     var seen = {};
     var out = [];
-    M.openingsFor(cfg, key, bookings, purposeKey).forEach(function (o) {
+    M.openingsFor(cfg, key, bookings, purposeKey, staffId, ignoreId).forEach(function (o) {
       if (seen[o.time]) return;
       seen[o.time] = true;
       out.push(o);

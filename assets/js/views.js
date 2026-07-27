@@ -356,12 +356,13 @@ window.DRB = window.DRB || {};
       } else {
         var v = M.vacancyOf(cfg, key, ctx.bookings);
 
-        // ご用件が指定されていれば、その枠を続けて取れる時刻の数を出す
-        var openN = ctx.purposeKey
-          ? M.openingTimes(cfg, key, ctx.bookings, ctx.purposeKey).length
+        // ご用件・担当が指定されていれば、その組み合わせで取れる時刻の数を出す
+        var narrowed = ctx.purposeKey || ctx.staffId;
+        var openN = narrowed
+          ? M.openingTimes(cfg, key, ctx.bookings, ctx.purposeKey, ctx.staffId).length
           : v.vacant;
 
-        btn.appendChild(el('span', 'cal__free', openN ? '空き ' + openN + (ctx.purposeKey ? '件' : '枠') : '空きなし'));
+        btn.appendChild(el('span', 'cal__free', openN ? '空き ' + openN + (narrowed ? '件' : '枠') : '空きなし'));
         var bar = el('div', 'cal__bar');
         var fill = el('i');
         fill.style.width = v.rate + '%';
@@ -405,13 +406,18 @@ window.DRB = window.DRB || {};
     if (!ctx.dateKey) return;
 
     var purpose = ctx.purposeKey ? M.purposeOf(ctx.cfg, ctx.purposeKey) : null;
+    var staff = ctx.staffId ? window.DRB.staffOf(ctx.cfg, ctx.staffId) : null;
+
+    var cond = [];
+    if (purpose) cond.push(purpose.label + '：' + purpose.span + '枠つづき');
+    if (staff) cond.push('担当 ' + staff.name);
     host.appendChild(el('p', 'daylist__h',
       M.formatDateFull(ctx.dateKey) + ' の空いているお時間' +
-      (purpose ? '（' + purpose.label + '：' + purpose.span + '枠つづき）' : '')));
+      (cond.length ? '（' + cond.join('／') + '）' : '')));
 
     var open;
-    if (ctx.purposeKey) {
-      open = M.openingTimes(ctx.cfg, ctx.dateKey, ctx.bookings, ctx.purposeKey)
+    if (ctx.purposeKey || ctx.staffId) {
+      open = M.openingTimes(ctx.cfg, ctx.dateKey, ctx.bookings, ctx.purposeKey, ctx.staffId)
         .map(function (o) { return { time: o.time, unit: o.unit }; });
     } else {
       open = M.openSlotsOf(ctx.cfg, ctx.dateKey, ctx.bookings)
@@ -419,9 +425,11 @@ window.DRB = window.DRB || {};
     }
 
     if (!open.length) {
-      host.appendChild(el('p', 'lead', purpose
-        ? 'この日は、このご用件に必要な枠を続けてお取りできる時間がございません。'
-        : 'この日は空きがございません。'));
+      var why = 'この日は空きがございません。';
+      if (staff && purpose) why = 'この日は、' + staff.name + 'が' + purpose.label + 'の枠を続けてお取りできる時間がございません。';
+      else if (staff) why = 'この日は、' + staff.name + 'の空いているお時間がございません。';
+      else if (purpose) why = 'この日は、このご用件に必要な枠を続けてお取りできる時間がございません。';
+      host.appendChild(el('p', 'lead', why));
       return;
     }
 

@@ -55,7 +55,6 @@ window.DRB = window.DRB || {};
 
       // 連絡先はデモ用。ドメインは受信できない example.jp を使う
       var hasMail = rnd() > 0.18;
-      var hasLine = rnd() > 0.55;
 
       patients.push({
         id: 'p' + cardNo,
@@ -64,7 +63,6 @@ window.DRB = window.DRB || {};
         kana: KANA_S[si] + ' ' + KANA_G[gi],
         phone: '090-' + String(1000 + Math.floor(rnd() * 8999)) + '-' + String(1000 + Math.floor(rnd() * 8999)),
         email: hasMail ? 'sample' + cardNo + '@example.jp' : '',
-        lineId: hasLine ? 'line-' + cardNo : '',
         birth: (1955 + Math.floor(rnd() * 60)) + '-' +
                ('0' + (1 + Math.floor(rnd() * 12))).slice(-2) + '-' +
                ('0' + (1 + Math.floor(rnd() * 28))).slice(-2),
@@ -100,17 +98,19 @@ window.DRB = window.DRB || {};
        再来院率がすべて100%になってしまう。 */
     var patients = buildPatients(cfg, 2200);
 
-    /* 後ろの何人かは予約に登場させない。
-       こうしておくと「しばらくお見えでない方」ができ、定期健診のご案内が意味を持つ。 */
-    var ACTIVE = 2000;
-    var activePatients = patients.slice(0, ACTIVE);
-
-    /* いつから通い始めた方か。
+    /* いつから通い始め、いつ足が遠のいたか。
        6割はこの期間より前からの通院、4割は期間中に新しくお見えになった方とし、
-       「新しい患者さん」の数が月ごとに動くようにする。 */
+       「新しい患者さん」の数が月ごとに動くようにする。
+       さらに2割ほどは途中でお見えにならなくなる方とし、来院の記録を残したまま
+       休眠されている状態を作る（記録が無いと分析の対象にならないため）。 */
     var jr = seededRandom('join');
-    activePatients.forEach(function (p, i) {
+    var activePatients = patients.slice();
+
+    activePatients.forEach(function (p) {
       p._join = jr() < 0.6 ? startKey : M.shiftDays(startKey, Math.floor(jr() * days));
+      // 6〜20か月前に最後のご来院となる方をつくる
+      p._leave = jr() < 0.2 ? X.addMonths(today, -(6 + Math.floor(jr() * 15))) : '';
+      if (p._leave && p._leave <= p._join) p._leave = '';
     });
     activePatients.sort(function (a, b) { return a._join.localeCompare(b._join); });
 
@@ -131,6 +131,8 @@ window.DRB = window.DRB || {};
       while (joinPtr < activePatients.length && activePatients[joinPtr]._join <= key) {
         joined.push(activePatients[joinPtr++]);
       }
+      // お見えにならなくなった方は候補から外す
+      joined = joined.filter(function (p) { return !p._leave || p._leave >= key; });
       if (!joined.length) continue;
 
       var rnd = seededRandom(key);
@@ -172,7 +174,7 @@ window.DRB = window.DRB || {};
             memo: '',
             status: status,
             staffId: pick(rnd, cfg.staff).id,
-            source: pick(rnd, ['reception', 'phone', 'phone', 'web', 'mail', 'line']),
+            source: pick(rnd, ['reception', 'phone', 'phone', 'web', 'mail']),
             arrivedAt: '', doneAt: '',
             cancelReason: status === 'canceled' ? pick(rnd, CANCEL_REASONS) : '',
             canceledAt: status === 'canceled' ? key : '',
@@ -234,18 +236,12 @@ window.DRB = window.DRB || {};
       p.firstVisit = firstVisitBy[p.id] || '';
     });
 
-    /* リコール案内が出るよう、しばらく来ていない方を何人か作る */
-    var stale = seededRandom('stale');
-    patients.forEach(function (p) {
-      if (p.lastVisit) return;
-      var months = 7 + Math.floor(stale() * 11);
-      p.lastVisit = X.addMonths(today, -months);
-      p.firstVisit = X.addMonths(p.lastVisit, -(12 + Math.floor(stale() * 24)));
-    });
+    /* ここまでで一度もお見えになっていない方は、ご登録だけの方として残す。
+       来院の記録がないのに最終来院日だけを入れると、分析の数字と食い違うため補わない。 */
 
     /* 送信ログのサンプル。
-       ご予約の確定メールに加えて、過去にお出しした定期健診のご案内（ハガキ・メール・LINE）を
-       媒体を混ぜて残す。分析タブの「DM後のご来院率」がここから計算される。 */
+       ご予約の確定メールに加えて、過去にお出しした定期健診のご案内（ハガキ・メール）を
+       媒体を混ぜて残す。分析タブの「ご案内後のご来院率」がここから計算される。 */
     var mrnd = seededRandom('messages');
     var mseq = 0;
 
@@ -262,12 +258,12 @@ window.DRB = window.DRB || {};
       });
     });
 
-    /* 定期健診のご案内の履歴。ハガキが主で、メール・LINEが混ざる。
+    /* 定期健診のご案内の履歴。ハガキが主で、メールが混ざる。
        分析タブの「ご案内後のご来院率」が意味を持つよう、
        媒体ごとに効き目の差が出るように置く。実際にご来院につながった案内は
        「ご来院日の5〜25日前」に、つながらなかった案内は
        「そのあと30日はご来院がない時期」に置く。 */
-    var HIT_RATE = { postcard: 0.22, mail: 0.33, line: 0.46 };
+    var HIT_RATE = { postcard: 0.22, mail: 0.36 };
 
     // 患者さんごとのご来院日（昇順）
     var visitsBy = {};
@@ -295,7 +291,7 @@ window.DRB = window.DRB || {};
       messages.push({
         id: 'm' + (mseq++).toString(36),
         patientId: p.id, bookingId: '', kind: 'recall', channel: ch,
-        to: ch === 'mail' ? p.email : (ch === 'line' ? p.lineId : 'ハガキ'),
+        to: ch === 'mail' ? p.email : 'ハガキ',
         subject: rendered.subject, body: '',
         at: at + 'T00:00:00.000Z', state: 'simulated', error: ''
       });
@@ -307,8 +303,7 @@ window.DRB = window.DRB || {};
       var visits = visitsBy[p.id] || [];
 
       for (var t = 0; t < times; t++) {
-        var ch = (p.lineId && mrnd() > 0.7) ? 'line'
-               : (p.email && mrnd() > 0.5) ? 'mail' : 'postcard';
+        var ch = (p.email && mrnd() > 0.5) ? 'mail' : 'postcard';
         var wantHit = mrnd() < HIT_RATE[ch];
 
         if (wantHit && visits.length) {
@@ -346,7 +341,7 @@ window.DRB = window.DRB || {};
     });
 
     // 組み立てに使っただけの項目は保存しない
-    patients.forEach(function (p) { delete p._join; });
+    patients.forEach(function (p) { delete p._join; delete p._leave; });
 
     return {
       bookings: bookings, patients: patients,
