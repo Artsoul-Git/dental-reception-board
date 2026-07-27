@@ -740,7 +740,8 @@ window.DRB = window.DRB || {};
     });
 
     $('logSearch').addEventListener('input', function () {
-      C.renderLog(state.cfg, state.messages, this.value);
+      // 台帳を渡さないとお名前で探せなくなるので、必ず一緒に渡す
+      C.renderLog(state.cfg, state.messages, this.value, state.patients);
     });
     $('btnLogCSV').addEventListener('click', exportLogCSV);
   }
@@ -1633,12 +1634,14 @@ window.DRB = window.DRB || {};
   }
 
   function exportLogCSV() {
-    var head = ['日時', '種類', '宛先', '件名', '状態', 'エラー'];
+    var head = ['日時', '種類', '手段', 'お名前', '宛先', '件名', '状態', 'エラー'];
     var lines = [csvLine(head)];
     state.messages.slice().sort(function (a, b) {
       return String(b.at).localeCompare(String(a.at));
     }).forEach(function (m) {
-      lines.push(csvLine([m.at, C.kindLabel(state.cfg, m.kind), m.to, m.subject,
+      var p = X.findPatient(state.patients, m.patientId);
+      lines.push(csvLine([m.at, C.kindLabel(state.cfg, m.kind),
+        DRB.channelOf(m.channel).label, p ? p.name : '', m.to, m.subject,
         C.stateLabel(m.state), m.error]));
     });
     download('送信ログ_' + M.todayKey() + '.csv', lines.join('\r\n'));
