@@ -1157,3 +1157,46 @@ td.is-hold .slot--free { background: repeating-linear-gradient(45deg, #fdfbf7, #
   .detail { grid-template-columns: 1fr; }
   .detail dd { margin-bottom: 4px; }
 }
+
+/* ===== CSVの取り込み（データ移行） ===== */
+.modal--mig { width: min(960px, calc(100vw - 24px)); }
+.mg-body { max-height: min(64vh, 620px); overflow: auto; padding-right: 4px; }
+.mg-h {
+  font-size: 15px;
+  margin: 18px 0 6px;
+  padding-bottom: 4px;
+  border-bottom: 2px solid var(--line);
+}
+.mg-sec { margin-bottom: 6px; }
+.mg-info {
+  background: var(--accent-tint);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+.mg-lead { color: var(--ink-mute); font-size: 13px; margin: 6px 0; }
+.mg-sum { font-weight: 700; font-size: 15px; }
+.mg-warn {
+  background: var(--hold-tint);
+  border-left: 4px solid var(--hold);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-size: 13px;
+  margin: 10px 0;
+}
+.mg-dim { color: var(--ink-mute); font-size: 13px; }
+.mg-table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 6px 0 10px; }
+.mg-table th {
+  background: var(--paper);
+  font-size: 12px;
+  color: var(--ink-mute);
+  position: sticky;
+  top: 0;
+}
+.mg-table td { vertical-align: top; }
+.mg-line { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.mg-val { color: var(--danger); word-break: break-all; }
+.mg-prev { color: var(--ink-mute); font-size: 12px; }
+.mg-sel { max-width: 22em; padding: 4px 6px; }
+.mg-acts { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+.mg-count { font-size: 13px; color: var(--ink-mute); }

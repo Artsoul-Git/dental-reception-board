@@ -615,6 +615,21 @@ window.DRB = window.DRB || {};
           });
         }).catch(reportError);
       },
+      onWipeMedical: function (p) {
+        D.confirm('診療に関する記載を消す',
+          p.name + '様の台帳から、アレルギー・既往・服薬の記載を消します。' +
+          'この欄は廃止したため、元に戻せません。よろしいですか。', '消す')
+          .then(function (ok) {
+            if (!ok) return;
+            var out = DRB.clone(p);
+            out.allergy = '';
+            out.medical = '';
+            return state.store.save('patients', out).then(reload).then(function () {
+              renderAll();
+              toast('記載を消しました。');
+            });
+          }).catch(reportError);
+      },
       onEditNext: function (p, openNext) {
         if (!openNext) { toast('これから先の未処理のご予約がありません。'); return; }
         openDetail(openNext);
@@ -769,12 +784,27 @@ window.DRB = window.DRB || {};
       minMonths: Number(elapsedSel.value) || 0
     });
 
-    /* お届けの手段を切り替えたら、宛先の見え方もそろえる */
+    /*
+     * お届けの手段ごとに、お出しできる方が変わる。同意は手段ごとに別々に持つ。
+     * メール … アドレスがあり、ご連絡メールの受信を承諾されている方
+     * ハガキ … ご住所があり、ハガキでのご案内を承諾されている方
+     * どちらも、ここで絞らないと希望されていない方へお出ししてしまう。
+     */
     var ch = $('recallChannel').value || 'postcard';
-    state.outbox.recall.forEach(function (r) {
+    state.outbox.recall = state.outbox.recall.filter(function (r) {
       var p = X.findPatient(state.patients, r.patientId);
+      if (!p) return false;
       r.channel = ch;
-      r.to = ch === 'mail' ? (p && p.email) || '' : 'ハガキ（宛名を印刷します）';
+
+      if (ch === 'mail') {
+        if (!p.email || p.mailOK === false) return false;
+        r.to = p.email;
+      } else {
+        if (p.postOK === false) return false;
+        if (!p.address) return false;
+        r.to = 'ハガキ（' + p.address + '）';
+      }
+      return true;
     });
 
     state.outbox.draft = state.messages.filter(function (m) { return m.state === 'draft'; })
@@ -1252,6 +1282,7 @@ window.DRB = window.DRB || {};
     $('btnExport2').addEventListener('click', exportCSV);
     $('btnExportPt').addEventListener('click', exportPatientCSV);
     $('fileImport').addEventListener('change', importCSV);
+    wireMigrate();
     $('btnReseed').addEventListener('click', function () {
       D.confirm('デモを初期状態に戻す',
         'いま入っているご予約・患者台帳・応対記録・送信ログをすべて消し、サンプルの状態に作り直します。よろしいですか。',
@@ -1574,6 +1605,61 @@ window.DRB = window.DRB || {};
     badge.classList.toggle('is-sheet', !!sheet);
   }
 
+  /* ================= データ移行（CSVの取り込み） =================
+   * 受付の方がご自分で取り込めることが契約上のお約束のため、
+   * 取り込みの中身は migrate.js に置き、ここでは入口の配線だけを行う。
+   */
+
+  function migrateCtx() {
+    return {
+      cfg: state.cfg,
+      patients: state.patients,
+      bookings: state.bookings,
+      store: state.store,
+      refresh: function () { return reload().then(renderAll); }
+    };
+  }
+
+  function refreshUndoButton() {
+    $('btnMigUndo').hidden = !DRB.migrate.canUndo();
+  }
+
+  function wireMigrate() {
+    var Mig = DRB.migrate;
+    Mig.wire();
+
+    $('fileMigPatient').addEventListener('change', function (ev) {
+      var f = ev.target.files && ev.target.files[0];
+      ev.target.value = '';
+      if (f) Mig.open('patient', f, migrateCtx(), refreshUndoButton);
+    });
+    $('fileMigBooking').addEventListener('change', function (ev) {
+      var f = ev.target.files && ev.target.files[0];
+      ev.target.value = '';
+      if (f) Mig.open('booking', f, migrateCtx(), refreshUndoButton);
+    });
+
+    $('btnTplPatient').addEventListener('click', function () { Mig.saveTemplate('patient', false); });
+    $('btnTplPatientEx').addEventListener('click', function () { Mig.saveTemplate('patient', true); });
+    $('btnTplBooking').addEventListener('click', function () { Mig.saveTemplate('booking', false); });
+    $('btnTplBookingEx').addEventListener('click', function () { Mig.saveTemplate('booking', true); });
+
+    $('btnMigUndo').addEventListener('click', function () {
+      D.confirm('直前の取り込みを元に戻す',
+        '直前に取り込んだぶんを取り消し、取り込む前の状態に戻します。よろしいですか。', '元に戻す')
+        .then(function (ok) {
+          if (!ok) return;
+          return Mig.undo(migrateCtx())
+            .then(function (label) { return reload().then(renderAll).then(function () {
+              refreshUndoButton();
+              toast(label + 'を取り込む前に戻しました。');
+            }); });
+        }).catch(reportError);
+    });
+
+    refreshUndoButton();
+  }
+
   /* ================= CSV ================= */
 
   function download(name, text) {
@@ -1602,15 +1688,15 @@ window.DRB = window.DRB || {};
 
   function exportPatientCSV() {
     var head = ['患者ID', '診察券番号', 'お名前', 'ふりがな', 'お電話', 'メール', '生年月日',
-      '初診', '最終来院', '定期健診の間隔', 'タグ', 'アレルギー', '既往・服薬',
-      'ご予約の連絡', 'お知らせ', 'メモ'];
+      '初診', '最終来院', '定期健診の間隔', 'タグ',
+      'ご連絡メール', 'お知らせメール', 'ハガキ', 'メモ'];
     var lines = [csvLine(head)];
     state.patients.forEach(function (p) {
       lines.push(csvLine([p.id, p.cardNo, p.name, p.kana, p.phone, p.email, p.birth,
         p.firstVisit, p.lastVisit, p.recallMonths || '', (p.tags || []).join(' '),
-        p.allergy, p.medical,
         p.mailOK === false ? '希望されない' : '受け取る',
         p.dmOK === false ? '希望されない' : '受け取る',
+        p.postOK === false ? '希望されない' : '受け取る',
         p.note]));
     });
     download('患者台帳_' + M.todayKey() + '.csv', lines.join('\r\n'));

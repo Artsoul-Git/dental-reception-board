@@ -111,10 +111,23 @@ window.DRB = window.DRB || {};
     host.appendChild(head);
 
     /* --- 注意事項は目立つところに --- */
+    /* アレルギー・既往の欄は廃止した（医療安全：カルテ側で更新されても
+       ここに古い情報が残り、受付や衛生士が古い情報で動くと事故になるため）。
+       過去に入力された値が残っている場合だけ、消していただくよう促す。 */
     if (p.allergy || p.medical) {
       var alert = el('div', 'ptalert');
-      if (p.allergy) alert.appendChild(el('p', null, '⚠ ' + p.allergy));
-      if (p.medical) alert.appendChild(el('p', null, '⚠ ' + p.medical));
+      alert.appendChild(el('p', null,
+        '⚠ 以前この方に入力された、診療に関する記載が残っています。'));
+      if (p.allergy) alert.appendChild(el('p', 'ptalert__old', p.allergy));
+      if (p.medical) alert.appendChild(el('p', 'ptalert__old', p.medical));
+      alert.appendChild(el('p', null,
+        'この欄は廃止しました。カルテ側で更新されても、ここには古い情報が残り続けるためです。' +
+        '下のボタンで消してください。'));
+
+      var wipe = el('button', 'btn btn--danger', 'この記載を消す');
+      wipe.type = 'button';
+      wipe.addEventListener('click', function () { ctx.onWipeMedical(p); });
+      alert.appendChild(wipe);
       host.appendChild(alert);
     }
 
@@ -208,11 +221,13 @@ window.DRB = window.DRB || {};
     }
   };
 
+  /* 同意は手段ごとに別々に持つ。メールを断られてもハガキは届く場合があるため。 */
   function consentLabel(p) {
-    var out = [];
-    out.push('ご予約の連絡：' + (p.mailOK === false ? '希望されない' : '受け取る'));
-    out.push('お知らせ：' + (p.dmOK === false ? '希望されない' : '受け取る'));
-    return out.join('　/　');
+    return [
+      'ご連絡メール：' + (p.mailOK === false ? '希望されない' : '受け取る'),
+      'お知らせメール：' + (p.dmOK === false ? '希望されない' : '受け取る'),
+      'ハガキ：' + (p.postOK === false ? '希望されない' : '受け取る')
+    ].join('　/　');
   }
 
   function ageOf(birth) {

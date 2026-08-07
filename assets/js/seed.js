@@ -67,15 +67,20 @@ window.DRB = window.DRB || {};
                ('0' + (1 + Math.floor(rnd() * 12))).slice(-2) + '-' +
                ('0' + (1 + Math.floor(rnd() * 28))).slice(-2),
         sex: rnd() > 0.5 ? 'f' : 'm',
-        address: '',
+        // ハガキのご案内には住所が要るので、デモでも持たせる（架空の住所）
+        address: '〇〇県〇〇市' + (1 + Math.floor(rnd() * 5)) + '丁目' +
+                 (1 + Math.floor(rnd() * 30)) + '-' + (1 + Math.floor(rnd() * 20)),
         firstVisit: '',
         lastVisit: '',
         recallMonths: pick(rnd, [0, 0, 0, 0, 3, 3, 6, 1, 2, -1]),
         tags: tags,
-        allergy: rnd() > 0.9 ? '金属アレルギーの申告あり' : '',
-        medical: rnd() > 0.88 ? '降圧剤を服用中' : '',
+        // 診療に関する情報は持たない（医療安全・v4方針）
+        allergy: '',
+        medical: '',
         mailOK: hasMail && rnd() > 0.06,
         dmOK: hasMail && rnd() > 0.2,
+        // ハガキはメールと別の意思。メールを断った方でもハガキは受け取ることが多い
+        postOK: rnd() > 0.12,
         note: '',
         createdAt: new Date().toISOString()
       });

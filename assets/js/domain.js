@@ -23,7 +23,7 @@ window.DRB = window.DRB || {};
       id: X.newPatientId(), cardNo: '', name: '', kana: '', phone: '', email: '',
       birth: '', sex: '', address: '', firstVisit: '', lastVisit: '',
       recallMonths: 0, tags: [], allergy: '', medical: '',
-      mailOK: true, dmOK: true, note: '', createdAt: new Date().toISOString()
+      mailOK: true, dmOK: true, postOK: true, note: '', createdAt: new Date().toISOString()
     };
   };
 

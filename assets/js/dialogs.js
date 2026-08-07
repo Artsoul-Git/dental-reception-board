@@ -409,11 +409,10 @@ window.DRB = window.DRB || {};
     $('ptPhone').value = p.phone || '';
     $('ptEmail').value = p.email || '';
     $('ptAddress').value = p.address || '';
-    $('ptAllergy').value = p.allergy || '';
-    $('ptMedical').value = p.medical || '';
     $('ptNote').value = p.note || '';
     $('ptMailOK').checked = p.mailOK !== false;
     $('ptDmOK').checked = p.dmOK !== false;
+    $('ptPostOK').checked = p.postOK !== false;
 
     fillSelect($('ptRecall'), window.DRB.RECALL_OPTIONS, 'value', 'label');
     $('ptRecall').value = String(Number(p.recallMonths) || 0);
@@ -470,11 +469,13 @@ window.DRB = window.DRB || {};
         out.address = $('ptAddress').value.trim();
         out.recallMonths = Number($('ptRecall').value);
         out.tags = currentTags();
-        out.allergy = $('ptAllergy').value.trim();
-        out.medical = $('ptMedical').value.trim();
+        // アレルギー・既往・服薬は持たない（医療安全：カルテと乖離した古い情報が事故を招くため）
+        out.allergy = '';
+        out.medical = '';
         out.note = $('ptNote').value.trim();
         out.mailOK = $('ptMailOK').checked;
         out.dmOK = $('ptDmOK').checked;
+        out.postOK = $('ptPostOK').checked;
         done(out);
       });
       on($('ptCancelBtn'), 'click', function () { done(null); });
